@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Registro de Bicicletas</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      html, body, #root {
+        height: 100%;
+      }
+      body {
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+      /* Estilo para o rótulo do marcador do motorista, para melhor legibilidade */
+      .marker-label {
+        text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;
+      }
+    </style>
+    <!-- 
+      ATENÇÃO: A chave de API está correta. A biblioteca "marker" foi removida
+      porque estamos trocando os "Advanced Markers" (que não funcionavam)
+      pelos marcadores clássicos, que são mais confiáveis e não precisam dela.
+    -->
+    <script async src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAw8KQGF_3F8-ynru_lw3EvaW9ainspAM8"></script>
+    <script type="importmap">
+{
+  "imports": {
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "react/": "https://esm.sh/react@^19.2.4/",
+    "react": "https://esm.sh/react@^19.2.4"
+  }
+}
+</script>
+
+</head>
+  <body class="bg-gray-100">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
