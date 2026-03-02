@@ -982,8 +982,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
                     setCurrentDriverLocation({ lat: latitude, lng: longitude });
                     apiGetCall('updateLocation', {
                         driverName,
-                        latitude: latitude.toString(),
-                        longitude: longitude.toString()
+                        latitude: latitude.toFixed(6),
+                        longitude: longitude.toFixed(6)
                     }).catch(err => console.error("Falha ao atualizar a localização:", err));
                 },
                 (err) => {
@@ -1057,7 +1057,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
 
 
     return (
-        <div className="bg-white p-6 rounded-xl shadow-lg w-full max-w-4xl mx-auto animate-fade-in-down">
+        <div className="bg-white p-4 sm:p-6 rounded-xl shadow-lg w-full max-w-4xl mx-auto animate-fade-in-down">
             <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 pb-4 border-b">
                 <div className="flex items-center gap-3">
                     <div>
@@ -1065,46 +1065,46 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
                         <p className="text-xs text-gray-600 uppercase tracking-wider">{category}</p>
                     </div>
                 </div>
-                <div className="flex items-center gap-1 mt-4 sm:mt-0">
-                    <button onClick={() => setRequestModalOpen(true)} title="Nova Solicitação" className="p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
-                                <PlusIcon className="w-7 h-7"/>
+                <div className="flex items-center flex-wrap gap-1 mt-4 sm:mt-0">
+                    <button onClick={() => setRequestModalOpen(true)} title="Nova Solicitação" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
+                                <PlusIcon className="w-6 h-6 sm:w-7 sm:h-7"/>
                             </button>
-                            <button onClick={() => setRouteModalOpen(true)} title="Criar Roteiro" className="p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
-                                <PlusPlusIcon className="w-7 h-7" />
+                            <button onClick={() => setRouteModalOpen(true)} title="Criar Roteiro" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
+                                <PlusPlusIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                             </button>
                             {category.includes('ADM') && (
-                                <button onClick={onShowMap} title="Ver Mapa em Tempo Real" className="p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
-                                    <MapIcon className="w-7 h-7"/>
+                                <button onClick={onShowMap} title="Ver Mapa em Tempo Real" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
+                                    <MapIcon className="w-6 h-6 sm:w-7 sm:h-7"/>
                                 </button>
                             )}
                             {category.toUpperCase() === 'MOTORISTA' && (
-                                <button onClick={() => { fetchSchedule(); setIsScheduleModalOpen(true); }} title="Minha Escala" className="p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
-                                    <CalendarIcon className="w-7 h-7" />
+                                <button onClick={() => { fetchSchedule(); setIsScheduleModalOpen(true); }} title="Minha Escala" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
+                                    <CalendarIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                                 </button>
                             )}
                             {!category.includes('ADM') && (
                                 <button 
                                     onClick={() => window.open('https://docs.google.com/forms/d/e/1FAIpQLSdYtWC_KKixt9gWwZG_Q6hyaD2QCvv-_ilOfhtUVJiF5EevSQ/viewform', '_blank')} 
                                     title="Formulário Veículo" 
-                                    className="p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors"
+                                    className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors"
                                 >
-                                    <CarIcon className="w-7 h-7" />
+                                    <CarIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                                 </button>
                             )}
                      {!category.includes('ADM') && (
-                        <button onClick={() => setReportModalOpen(true)} title="Gerar Relatório" className="p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
-                            <SheetIcon className="w-7 h-7" />
+                        <button onClick={() => setReportModalOpen(true)} title="Gerar Relatório" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
+                            <SheetIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                         </button>
                      )}
                     <button 
                         onClick={() => { fetchReporData(); setIsReporModalOpen(true); }}
-                        className="p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors"
+                        className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors"
                         title="Estações Livres"
                     >
-                        <BicycleIcon className="w-7 h-7" />
+                        <BicycleIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                     </button>
-                    <button onClick={onLogout} title="Sair" className="p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-red-600 transition-colors">
-                        <LogoutIcon className="w-7 h-7" />
+                    <button onClick={onLogout} title="Sair" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-red-600 transition-colors">
+                        <LogoutIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                     </button>
                 </div>
             </header>

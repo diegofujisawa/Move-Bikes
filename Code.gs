@@ -83,6 +83,8 @@ function doGet(e) {
     
     if (action === 'getDriverLocations') {
       response = { ...getDriverLocations(), version: BACKEND_VERSION };
+    } else if (action === 'health') {
+      response = { success: true, status: 'ok', version: BACKEND_VERSION };
     } else if (action === 'getStations') {
       response = { ...getStations(), version: BACKEND_VERSION };
     } else if (action === 'getMotoristas') {
@@ -124,7 +126,7 @@ function doGet(e) {
 }
 
 
-const BACKEND_VERSION = "73.0-fix-minus-sign";
+const BACKEND_VERSION = "74.0-fix-login-trim";
 
 /**
  * Formata uma data para o padrão brasileiro (DD/MM/AAAA HH:mm:ss).
@@ -232,9 +234,9 @@ function handleLogin(login, password) {
     const rowIndexInSheet = foundRowIndex + 2; 
     const rowData = values[foundRowIndex];
     
-    const storedPassword = (rowData[COLUMN_INDICES.ACCESS.SENHA - 1] || '').toString();
+    const storedPassword = (rowData[COLUMN_INDICES.ACCESS.SENHA - 1] || '').toString().trim();
 
-    if (storedPassword === password.toString()) {
+    if (storedPassword === password.toString().trim()) {
       sheet.getRange(rowIndexInSheet, COLUMN_INDICES.ACCESS.STATUS_ONLINE).setValue('LOGADO');
       return { 
         success: true, 

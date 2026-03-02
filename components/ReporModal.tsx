@@ -40,17 +40,50 @@ const ReporModal: React.FC<ReporModalProps> = ({ isOpen, onClose, data, isLoadin
         if (!stationKey) stationKey = keys[1] || keys[0];
         if (!qtyKey) qtyKey = keys[2] || keys[1];
 
-        // Filter: Only non-empty names and exclude header-like rows
+        // Lista de estações permitidas (26 fornecidas pelo usuário)
+        const allowedStations = [
+            "Open Mall",
+            "Pq. Ribeirão Vermelho - B",
+            "Villa Real – Urbanova",
+            "Pq Tecnológico",
+            "Centro da Juventude",
+            "LV - Maurício Cury",
+            "LV - Vl. Sanchez",
+            "Arco Inovação",
+            "Serttel Filial SJC",
+            "Parque da Cidade",
+            "Mirante Anchieta",
+            "Praça Conego Lima",
+            "LV - Osvaldo Cruz",
+            "LV - Jd. Oriente",
+            "Banco do Povo",
+            "Pç. Padre João (Igreja Matriz)",
+            "Pç. Afonso Pena",
+            "Pç. Kennedy",
+            "Pç. Floripes Bicudo",
+            "Pq. Vicentina Aranha",
+            "Pq. Santos Dumont",
+            "LV - Dutra",
+            "Cassiopéia",
+            "LV - Jd. América",
+            "Torii",
+            "Pç. Ulisses Guimarães"
+        ].map(s => s.toLowerCase().trim());
+
+        // Filter: Only non-empty names, exclude header-like rows, and MUST be in the allowed list
         const filteredData = data.filter(row => {
             const stationVal = String(row[stationKey] || '').trim();
             if (!stationVal) return false;
 
             const lowerVal = stationVal.toLowerCase();
+            
+            // Excluir cabeçalhos
             if (lowerVal.includes('estação') || lowerVal.includes('estacao') || lowerVal.includes('número') || lowerVal.includes('numero')) {
                 return false;
             }
 
-            return true;
+            // Filtrar apenas as 26 estações permitidas
+            return allowedStations.includes(lowerVal);
         });
 
         // Map to simplified objects and sort by quantity ascending

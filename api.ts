@@ -29,21 +29,9 @@ async function fetchWithTimeout(resource: RequestInfo, options: RequestInit & { 
  */
 export const checkApiConnection = async () => {
   try {
-    const response = await fetchWithTimeout(SCRIPT_URL, {
-      method: 'GET',
-      mode: 'cors',
-      cache: 'no-store',
-      redirect: 'follow',
-      timeout: 30000, 
-    });
-
-    if (!response.ok) {
-      // Tenta ler o corpo do erro para mais detalhes, se possível.
-      const errorBody = await response.text().catch(() => 'Não foi possível ler o corpo do erro.');
-      throw new Error(`O servidor respondeu com um erro: ${response.status} ${response.statusText}. Detalhes: ${errorBody}`);
-    }
-
-    const result = await response.json();
+    // Usamos apiGetCall para aproveitar a lógica de tratamento de erros e CORS já implementada.
+    // Passamos uma ação inexistente ou vazia, o que fará o doGet retornar o status padrão "ok".
+    const result = await apiGetCall('health');
     return result;
 
   } catch (err: any) {
@@ -72,7 +60,7 @@ export const checkApiConnection = async () => {
  * @param params Parâmetros adicionais para a query string.
  * @returns A resposta JSON do servidor.
  */
-export const apiGetCall = async (action: string, params: Record<string, string> = {}) => {
+export const apiGetCall = async (action: string, params: Record<string, string> = {}, retries = 1) => {
   const url = new URL(SCRIPT_URL);
   url.searchParams.append('action', action);
   Object.entries(params).forEach(([key, value]) => url.searchParams.append(key, value));
@@ -81,6 +69,7 @@ export const apiGetCall = async (action: string, params: Record<string, string> 
     const response = await fetchWithTimeout(url.toString(), {
       method: 'GET',
       mode: 'cors',
+      credentials: 'omit',
       cache: 'no-store',
       redirect: 'follow',
       timeout: 30000,
@@ -109,6 +98,12 @@ export const apiGetCall = async (action: string, params: Record<string, string> 
     return result;
 
   } catch (err: any) {
+    if (retries > 0 && (err.name === 'AbortError' || err.message.includes('aborted') || err.message.includes('Failed to fetch'))) {
+      console.warn(`Tentando novamente a chamada GET (${retries} tentativas restantes)...`);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      return apiGetCall(action, params, retries - 1);
+    }
+
     console.error(`Falha na chamada GET da API para ${url.toString()}.`, err);
     if (err.name === 'AbortError' || err.message.includes('aborted')) {
       throw new Error('A busca de dados demorou muito para responder (timeout).');
@@ -134,6 +129,7 @@ export const apiCall = async (payload: object, retries = 1, silent = false): Pro
     const response = await fetchWithTimeout(SCRIPT_URL, {
       method: 'POST',
       mode: 'cors',
+      credentials: 'omit',
       cache: 'no-store',
       headers: {
         'Content-Type': 'text/plain;charset=utf-8',
