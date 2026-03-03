@@ -126,7 +126,7 @@ function doGet(e) {
 }
 
 
-const BACKEND_VERSION = "74.0-fix-login-trim";
+const BACKEND_VERSION = "75.0-fix-requests-duplication";
 
 /**
  * Formata uma data para o padrão brasileiro (DD/MM/AAAA HH:mm:ss).
@@ -783,38 +783,27 @@ function syncWithRequests(patrimonio, status, observacao, motorista) {
   const data = sheet.getDataRange().getValues();
   const motoristaLower = (motorista || '').toString().toLowerCase();
   const patrimonioStr = (patrimonio || '').toString();
-  let found = false;
 
   // 1. Tenta encontrar uma solicitação "Aceita" para finalizar
   if (data.length > 1) {
-    for (let i = 1; i < data.length; i++) {
-      const rowPatrimonio = (data[i][COLUMN_INDICES.REQUESTS.PATRIMONIO - 1] || '').toString();
+    // Percorre de trás para frente para encontrar a solicitação mais recente
+    for (let i = data.length - 1; i >= 1; i--) {
+      const rowPatrimonioRaw = (data[i][COLUMN_INDICES.REQUESTS.PATRIMONIO - 1] || '').toString();
+      const rowPatrimonios = rowPatrimonioRaw.split(',').map(s => s.trim());
       const rowStatus = (data[i][COLUMN_INDICES.REQUESTS.SITUACAO - 1] || '').toString().toLowerCase();
       const rowAceitaPor = (data[i][COLUMN_INDICES.REQUESTS.ACEITA_POR - 1] || '').toString().toLowerCase();
 
-      if (rowPatrimonio === patrimonioStr && rowStatus === 'aceita' && rowAceitaPor === motoristaLower) {
+      // Verifica se o patrimônio está na lista (pode ser um único ou vários separados por vírgula)
+      if (rowPatrimonios.includes(patrimonioStr) && rowStatus === 'aceita' && rowAceitaPor === motoristaLower) {
         const row = i + 1;
         sheet.getRange(row, COLUMN_INDICES.REQUESTS.SITUACAO).setValue('Finalizada');
-        found = true;
-        break;
+        return; // Encontrou e atualizou, não precisa continuar nem criar nova linha
       }
     }
   }
-
-  // 2. Se não havia solicitação prévia, cria uma nova já como "Finalizada"
-  // Isso garante que TODAS as ações apareçam no histórico de notificações conforme solicitado.
-  if (!found) {
-    const newRow = new Array(9).fill(''); // 9 colunas conforme COLUMN_INDICES.REQUESTS
-    newRow[COLUMN_INDICES.REQUESTS.TIMESTAMP - 1] = new Date();
-    newRow[COLUMN_INDICES.REQUESTS.PATRIMONIO - 1] = patrimonio;
-    newRow[COLUMN_INDICES.REQUESTS.OCORRENCIA - 1] = status;
-    newRow[COLUMN_INDICES.REQUESTS.LOCAL - 1] = observacao || 'Finalizado pelo App';
-    newRow[COLUMN_INDICES.REQUESTS.ACEITA_POR - 1] = motorista;
-    newRow[COLUMN_INDICES.REQUESTS.ACEITA_DATA - 1] = new Date();
-    newRow[COLUMN_INDICES.REQUESTS.SITUACAO - 1] = 'Finalizada';
-    newRow[COLUMN_INDICES.REQUESTS.DESTINATARIO - 1] = motorista;
-    sheet.appendRow(newRow);
-  }
+  
+  // REMOVIDO: O bloco que criava uma nova linha na aba Solicitacao se 'found' fosse falso.
+  // Agora a aba Solicitacao conterá apenas as notificações que foram explicitamente enviadas para lá.
 }
 
 /**

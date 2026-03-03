@@ -373,25 +373,29 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
     };
 
     const handleAcceptRequest = async (requestId: number, bikeNumbers: string) => {
+        const originalPendingRequests = [...pendingRequests];
+        const originalRouteBikes = [...routeBikes];
+        
+        // ATUALIZAÇÃO OTIMISTA: Remove da lista e adiciona ao roteiro imediatamente
+        setPendingRequests(prev => prev.filter(r => r.id !== requestId));
+        const bikesToAdd = bikeNumbers.split(',').map(s => s.trim()).filter(Boolean);
+        const newRouteBikes = [...new Set([...routeBikes, ...bikesToAdd])];
+        setRouteBikes(newRouteBikes);
+
         setIsLoading(true);
         try {
             const result = await apiCall({ action: 'acceptRequest', requestId, driverName });
             if (result.success) {
-                // Adiciona as bikes ao roteiro local
-                const bikesToAdd = bikeNumbers.split(',').map(s => s.trim()).filter(Boolean);
-                const newRouteBikes = [...new Set([...routeBikes, ...bikesToAdd])];
-                setRouteBikes(newRouteBikes);
-
                 // Atualiza o estado do roteiro no servidor
                 await apiCall({ action: 'updateDriverState', driverName, routeBikes: newRouteBikes, collectedBikes });
-
-                // Remove a solicitação da lista de pendentes
-                fetchRequests();
                 alert('Solicitação aceita e adicionada ao seu roteiro!');
             } else {
                 throw new Error(result.error || 'Falha ao aceitar a solicitação.');
             }
         } catch (err: any) {
+            // ROLLBACK em caso de erro
+            setPendingRequests(originalPendingRequests);
+            setRouteBikes(originalRouteBikes);
             setError(err.message);
         } finally {
             setIsLoading(false);
@@ -399,16 +403,22 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
     };
 
     const handleDeclineRequest = async (requestId: number) => {
+        const originalPendingRequests = [...pendingRequests];
+        
+        // ATUALIZAÇÃO OTIMISTA: Remove da lista imediatamente
+        setPendingRequests(prev => prev.filter(r => r.id !== requestId));
+
         setIsLoading(true);
         try {
             const result = await apiCall({ action: 'declineRequest', requestId, driverName });
             if (result.success) {
-                fetchRequests(); // Atualiza a lista
                 alert('Solicitação recusada.');
             } else {
                 throw new Error(result.error || 'Falha ao recusar a solicitação.');
             }
         } catch (err: any) {
+            // ROLLBACK em caso de erro
+            setPendingRequests(originalPendingRequests);
             setError(err.message);
         } finally {
             setIsLoading(false);
@@ -492,6 +502,15 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
         if (!searchedBike) return;
 
         const bikeNumber = searchedBike['Patrimônio'];
+        const originalSearchedBike = searchedBike;
+        const originalSearchTerm = searchTerm;
+        const originalBikeInLimbo = bikeInLimbo;
+
+        // ATUALIZAÇÃO OTIMISTA: Limpa a busca imediatamente
+        setSearchedBike(null);
+        setSearchTerm('');
+        setBikeInLimbo(null);
+        
         setIsLoading(true);
         setError(null);
 
@@ -500,7 +519,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
             if (status === 'Não encontrada') {
                 const rowData = [
                     formatDateTime(new Date()), bikeNumber, "Não encontrada", "", driverName,
-                    searchedBike['Status'], searchedBike['Bateria'], searchedBike['Trava'], searchedBike['Localidade']
+                    originalSearchedBike['Status'], originalSearchedBike['Bateria'], originalSearchedBike['Trava'], originalSearchedBike['Localidade']
                 ];
                 const reportResult = await apiCall({ action: 'logReport', rowData });
                 if (!reportResult.success) {
@@ -527,12 +546,11 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
                     throw new Error(stateResult.error || 'Falha ao mover a bicicleta.');
                 }
             }
-
-            setSearchedBike(null); // Limpa o resultado da consulta
-            setSearchTerm(''); // Limpa o campo de input da busca
-            setBikeInLimbo(null); // Limpa o estado de limbo pois a bike foi finalizada
-
         } catch (err: any) {
+            // ROLLBACK em caso de erro
+            setSearchedBike(originalSearchedBike);
+            setSearchTerm(originalSearchTerm);
+            setBikeInLimbo(originalBikeInLimbo);
             setError(err.message || `Ocorreu um erro ao processar a ação: ${status}`);
         } finally {
             setIsLoading(false);
@@ -644,20 +662,35 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
         const bikeToRestore = bikeInLimbo;
         setBikeInLimbo(null);
         
+        isUpdatingStateRef.current = true;
+        
+        // Atualiza localmente primeiro
+        let newRouteBikes: string[] = [];
         setRouteBikes(prev => {
-            if (prev.includes(bikeToRestore)) return prev;
-            const updated = [...prev, bikeToRestore];
-            
+            if (prev.includes(bikeToRestore)) {
+                newRouteBikes = prev;
+                return prev;
+            }
+            newRouteBikes = [...prev, bikeToRestore];
+            return newRouteBikes;
+        });
+
+        try {
             // Sincroniza com o servidor
-            apiCall({
+            await apiCall({
                 action: 'updateDriverState',
                 driverName,
-                routeBikes: updated,
+                routeBikes: newRouteBikes.length > 0 ? newRouteBikes : [...routeBikes, bikeToRestore],
                 collectedBikes: collectedBikes
-            }).catch(err => console.error("Erro ao restaurar bike do limbo:", err));
-            
-            return updated;
-        });
+            });
+        } catch (err) {
+            console.error("Erro ao restaurar bike do limbo:", err);
+        } finally {
+            // Pequeno delay para garantir que o servidor processou antes de liberar o fetch de fundo
+            setTimeout(() => {
+                isUpdatingStateRef.current = false;
+            }, 1000);
+        }
     };
 
     
@@ -668,6 +701,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
         // Salva o estado original para rollback
         const originalRouteBikes = [...routeBikes];
         isUpdatingStateRef.current = true;
+        setIsLoading(true); // Bloqueia outros cliques
 
         // ATUALIZAÇÃO OTIMISTA: Remove a bike da rota na UI e inicia a consulta
         const newRouteBikes = routeBikes.filter(b => b !== bikeNumber);
@@ -693,8 +727,10 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
             // ROLLBACK: Se a chamada falhar, restaura o estado original
             setError(`Falha ao remover a bike ${bikeNumber} do roteiro. Restaurando.`);
             setRouteBikes(originalRouteBikes);
+            setBikeInLimbo(null);
         } finally {
             isUpdatingStateRef.current = false;
+            setIsLoading(false);
         }
     };
 
@@ -702,6 +738,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
         // Salva o estado original para rollback
         const originalRouteBikes = [...routeBikes];
         isUpdatingStateRef.current = true;
+        if (!silent) setIsLoading(true);
 
         // ATUALIZAÇÃO OTIMISTA: Remove a bike da rota na UI imediatamente
         const newRouteBikes = routeBikes.filter(b => b !== bikeNumber);
@@ -735,6 +772,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
             if (silent) throw err; // Repassa o erro se estiver no modo silencioso
         } finally {
             isUpdatingStateRef.current = false;
+            if (!silent) setIsLoading(false);
         }
     };
 
@@ -1201,8 +1239,20 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
                             </div>
                         </div>
                         <div className="mt-4 pt-4 border-t border-green-200 grid grid-cols-2 gap-2">
-                            <button onClick={() => handleStatusUpdate('Recolhida')} className="px-3 py-1.5 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm w-full">Recolhida</button>
-                            <button onClick={() => handleStatusUpdate('Não encontrada')} className="px-3 py-1.5 bg-red-600 text-white rounded-md hover:bg-red-700 text-sm w-full">Não Encontrada</button>
+                            <button 
+                                onClick={() => handleStatusUpdate('Recolhida')} 
+                                disabled={isLoading || isSearching}
+                                className="px-3 py-1.5 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm w-full disabled:bg-gray-400"
+                            >
+                                Recolhida
+                            </button>
+                            <button 
+                                onClick={() => handleStatusUpdate('Não encontrada')} 
+                                disabled={isLoading || isSearching}
+                                className="px-3 py-1.5 bg-red-600 text-white rounded-md hover:bg-red-700 text-sm w-full disabled:bg-gray-400"
+                            >
+                                Não Encontrada
+                            </button>
                         </div>
                     </div>
                 )}
@@ -1427,9 +1477,10 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
                                                                 {alert.situacao === 'Localizada' ? (
                                                                     <button 
                                                                         onClick={() => handleConfirmFound(alert.id)}
-                                                                        className="px-2 py-1 bg-green-600 text-white text-[10px] font-bold rounded hover:bg-green-700 transition-colors shadow-sm active:scale-95"
+                                                                        disabled={isLoading}
+                                                                        className="px-2 py-1 bg-green-600 text-white text-[10px] font-bold rounded hover:bg-green-700 transition-colors shadow-sm active:scale-95 disabled:bg-gray-400"
                                                                     >
-                                                                        Confirmar
+                                                                        {isLoading ? '...' : 'Confirmar'}
                                                                     </button>
                                                                 ) : (
                                                                     <span className="text-[10px] text-gray-400 italic">Pendente</span>
@@ -1483,9 +1534,10 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
                                                             <td className="p-2 text-center">
                                                                 <button 
                                                                     onClick={() => handleConfirmVandalizedFound(v.id)}
-                                                                    className="px-2 py-1 bg-orange-600 text-white text-[10px] font-bold rounded hover:bg-orange-700 transition-colors"
+                                                                    disabled={isLoading}
+                                                                    className="px-2 py-1 bg-orange-600 text-white text-[10px] font-bold rounded hover:bg-orange-700 transition-colors disabled:bg-gray-400"
                                                                 >
-                                                                    Encontrada
+                                                                    {isLoading ? '...' : 'Encontrada'}
                                                                 </button>
                                                             </td>
                                                         </tr>
