@@ -45,6 +45,34 @@ const RequestModal: React.FC<RequestModalProps> = ({ isOpen, onClose, onSubmit, 
 
   const prevIsOpen = usePrevious(isOpen);
 
+  const [driverDistances, setDriverDistances] = useState<Record<string, string>>({});
+
+  // Efeito para calcular distâncias reais via Google Maps Distance Matrix
+  useEffect(() => {
+    if (!bikeCoords || driverLocations.length === 0 || !window.google) return;
+
+    const service = new google.maps.DistanceMatrixService();
+    const origins = [new google.maps.LatLng(bikeCoords.lat, bikeCoords.lng)];
+    const destinations = driverLocations.map(loc => new google.maps.LatLng(loc.latitude, loc.longitude));
+
+    service.getDistanceMatrix({
+      origins,
+      destinations,
+      travelMode: google.maps.TravelMode.DRIVING,
+      unitSystem: google.maps.UnitSystem.METRIC,
+    }, (response, status) => {
+      if (status === 'OK' && response) {
+        const newDistances: Record<string, string> = {};
+        response.rows[0].elements.forEach((element, index) => {
+          if (element.status === 'OK') {
+            newDistances[driverLocations[index].driverName] = element.distance.text;
+          }
+        });
+        setDriverDistances(newDistances);
+      }
+    });
+  }, [bikeCoords, driverLocations]);
+
   // Efeito para extrair coordenadas da localização digitada manualmente
   useEffect(() => {
     const parseCoord = (val: any) => {
@@ -164,11 +192,16 @@ const RequestModal: React.FC<RequestModalProps> = ({ isOpen, onClose, onSubmit, 
                     if (bikeCoords) {
                       const driverLoc = driverLocations.find(loc => loc.driverName === name);
                       if (driverLoc) {
-                        const dist = calculateDistance(bikeCoords.lat, bikeCoords.lng, driverLoc.latitude, driverLoc.longitude);
-                        distanceText = ` (${dist.toFixed(2)} km)`;
+                        const dist = driverDistances[name];
+                        if (dist) {
+                          distanceText = ` (${dist})`;
+                        } else {
+                          // Fallback para distância linear enquanto carrega ou se falhar
+                          const linearDist = calculateDistance(bikeCoords.lat, bikeCoords.lng, driverLoc.latitude, driverLoc.longitude);
+                          distanceText = ` (~${linearDist.toFixed(2)} km)`;
+                        }
                       } else {
                         distanceText = ' (Sem GPS)';
-                        console.log(`Localização não encontrada para o motorista: ${name}`);
                       }
                     }
                     return (

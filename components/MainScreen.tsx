@@ -50,6 +50,8 @@ const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: numbe
 };
 
 const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout, onShowMap }) => {
+    const [gpsError, setGpsError] = useState<string | null>(null);
+    const [routeDistances, setRouteDistances] = useState<Record<string, { distance: string, duration: string, value: number }>>({});
     const [dailyActivity] = useState<DailyActivity>({
         date: new Date().toISOString().split('T')[0],
         remanejadasEstacao: [],
@@ -893,7 +895,25 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
         try {
             const result = await apiCall({ action: 'getRouteDetails', driverName, bikeNumbers: routeBikes });
             if (result.success && result.data) {
-                setRouteBikesDetails(result.data);
+                setRouteBikesDetails(prev => {
+                    const newData = { ...result.data };
+                    // Fallback: se o backend não enviou posição inicial, tenta manter a que já tínhamos
+                    // ou usa a primeira posição atual recebida como inicial para futuras comparações.
+                    Object.keys(newData).forEach(bikeId => {
+                        if (newData[bikeId].initialLat === null) {
+                            if (prev[bikeId] && prev[bikeId].initialLat !== null) {
+                                newData[bikeId].initialLat = prev[bikeId].initialLat;
+                                newData[bikeId].initialLng = prev[bikeId].initialLng;
+                            } else if (prev[bikeId] && prev[bikeId].currentLat !== null) {
+                                // Se não tínhamos inicial, mas tínhamos uma posição atual anterior,
+                                // usamos ela como inicial para começar a detectar movimento a partir de agora.
+                                newData[bikeId].initialLat = prev[bikeId].currentLat;
+                                newData[bikeId].initialLng = prev[bikeId].currentLng;
+                            }
+                        }
+                    });
+                    return newData;
+                });
             }
         } catch (err: any) {
             console.error('Erro ao buscar detalhes do roteiro:', err.message);
@@ -910,6 +930,11 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
         if (!currentDriverLocation || routeBikes.length === 0) return routeBikes;
         
         return [...routeBikes].sort((a, b) => {
+            // Se tivermos distâncias do Google Maps, usamos elas para ordenar
+            if (routeDistances[a] && routeDistances[b]) {
+                return routeDistances[a].value - routeDistances[b].value;
+            }
+
             const detailsA = routeBikesDetails[a];
             const detailsB = routeBikesDetails[b];
             
@@ -922,7 +947,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
             
             return distA - distB;
         });
-    }, [routeBikes, routeBikesDetails, currentDriverLocation]);
+    }, [routeBikes, routeBikesDetails, currentDriverLocation, routeDistances]);
 
     const fetchBikeConflicts = async () => {
         try {
@@ -972,19 +997,24 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
 
     useEffect(() => {
         const refreshAll = async () => {
-            if (document.visibilityState === 'hidden') return;
-            await Promise.all([
-                fetchRequests(),
-                fetchDriverState(),
-                fetchBikeConflicts(),
-                fetchSchedule(),
-                fetchMotoristas(),
-                fetchDriverLocations(),
-                category.includes('ADM') ? fetchDriversSummary() : Promise.resolve(),
-                category.includes('ADM') ? fetchAlerts() : Promise.resolve(),
-                category.includes('ADM') ? fetchVandalized() : Promise.resolve(),
-                category.includes('ADM') ? fetchChangeStatusData() : Promise.resolve()
-            ]);
+            if (document.visibilityState === 'hidden' || isUpdatingStateRef.current) return;
+            
+            try {
+                await Promise.all([
+                    fetchRequests(),
+                    fetchDriverState(),
+                    fetchBikeConflicts(),
+                    fetchSchedule(),
+                    fetchMotoristas(),
+                    fetchDriverLocations(),
+                    category.includes('ADM') ? fetchDriversSummary() : Promise.resolve(),
+                    category.includes('ADM') ? fetchAlerts() : Promise.resolve(),
+                    category.includes('ADM') ? fetchVandalized() : Promise.resolve(),
+                    category.includes('ADM') ? fetchChangeStatusData() : Promise.resolve()
+                ]);
+            } catch (err) {
+                console.error("Erro na atualização automática:", err);
+            }
         };
 
         refreshAll();
@@ -1011,40 +1041,92 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
             return;
         }
 
-        const updateLocationOnServer = () => {
-            if (!navigator.geolocation) return;
+        if (!navigator.geolocation) {
+            setGpsError("Seu navegador não suporta geolocalização.");
+            return;
+        }
 
-            navigator.geolocation.getCurrentPosition(
-                (position) => {
-                    const { latitude, longitude } = position.coords;
-                    setCurrentDriverLocation({ lat: latitude, lng: longitude });
-                    apiGetCall('updateLocation', {
-                        driverName,
-                        latitude: latitude.toFixed(6),
-                        longitude: longitude.toFixed(6)
-                    }).catch(err => console.error("Falha ao atualizar a localização:", err));
-                },
-                (err) => {
-                    if (err.code !== err.TIMEOUT) {
-                        console.warn(`Erro de Geolocalização (${err.code}): ${err.message}`);
-                    }
-                },
-                { 
-                    enableHighAccuracy: true, 
-                    timeout: 10000, 
-                    maximumAge: 0 
+        const watchId = navigator.geolocation.watchPosition(
+            (position) => {
+                const { latitude, longitude } = position.coords;
+                setGpsError(null);
+                setCurrentDriverLocation({ lat: latitude, lng: longitude });
+                
+                // Atualiza a localização no servidor de forma silenciosa
+                apiGetCall('updateLocation', {
+                    driverName,
+                    latitude: latitude.toFixed(6),
+                    longitude: longitude.toFixed(6)
+                }).catch(err => console.error("Falha ao atualizar a localização:", err));
+            },
+            (err) => {
+                console.warn(`Erro de Geolocalização (${err.code}): ${err.message}`);
+                if (err.code === err.PERMISSION_DENIED) {
+                    setGpsError("Acesso ao GPS negado. O uso do aplicativo requer localização ativa.");
+                } else if (err.code === err.POSITION_UNAVAILABLE) {
+                    setGpsError("Informação de localização indisponível. Verifique se o GPS está ligado.");
+                } else if (err.code === err.TIMEOUT) {
+                    // Timeout não bloqueia o app imediatamente se já tivermos uma posição, 
+                    // mas se for persistente pode ser um problema.
+                    console.log("Timeout ao obter localização.");
                 }
-            );
-        };
-
-        // Atualiza imediatamente e depois a cada 5 segundos
-        updateLocationOnServer();
-        const intervalId = setInterval(updateLocationOnServer, 5000);
+            },
+            { 
+                enableHighAccuracy: true, 
+                timeout: 15000, 
+                maximumAge: 0 
+            }
+        );
 
         return () => {
-            clearInterval(intervalId);
+            navigator.geolocation.clearWatch(watchId);
         };
     }, [driverName, category]);
+
+    // Efeito para calcular distâncias reais via Google Maps Distance Matrix
+    useEffect(() => {
+        if (!currentDriverLocation || routeBikes.length === 0 || !window.google) return;
+
+        const service = new google.maps.DistanceMatrixService();
+        const origins = [new google.maps.LatLng(currentDriverLocation.lat, currentDriverLocation.lng)];
+        
+        // Mapeia as bikes para suas coordenadas
+        const destinations = routeBikes.map(bikeId => {
+            const details = routeBikesDetails[bikeId];
+            if (details && details.currentLat !== null && details.currentLng !== null) {
+                return new google.maps.LatLng(details.currentLat, details.currentLng);
+            }
+            return null;
+        }).filter(Boolean) as google.maps.LatLng[];
+
+        if (destinations.length === 0) return;
+
+        service.getDistanceMatrix({
+            origins,
+            destinations,
+            travelMode: google.maps.TravelMode.DRIVING,
+            unitSystem: google.maps.UnitSystem.METRIC,
+        }, (response, status) => {
+            if (status === 'OK' && response) {
+                const newDistances: Record<string, any> = {};
+                const validBikeIds = routeBikes.filter(bikeId => {
+                    const details = routeBikesDetails[bikeId];
+                    return details && details.currentLat !== null && details.currentLng !== null;
+                });
+
+                response.rows[0].elements.forEach((element, index) => {
+                    if (element.status === 'OK') {
+                        newDistances[validBikeIds[index]] = {
+                            distance: element.distance.text,
+                            duration: element.duration.text,
+                            value: element.distance.value
+                        };
+                    }
+                });
+                setRouteDistances(newDistances);
+            }
+        });
+    }, [currentDriverLocation, routeBikes, routeBikesDetails]);
 
     const fetchRequests = async () => {
         try {
@@ -1093,6 +1175,26 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
         return <p className="text-sm text-gray-700 break-all"><span className="font-semibold">Local:</span> {location}</p>;
     };
 
+
+    if (gpsError) {
+        return (
+            <div className="fixed inset-0 bg-white z-[9999] flex flex-col items-center justify-center p-6 text-center">
+                <AlertTriangleIcon className="w-16 h-16 text-red-500 mb-4" />
+                <h1 className="text-2xl font-bold text-gray-900 mb-2">GPS Obrigatório</h1>
+                <p className="text-gray-600 mb-6 max-w-xs">
+                    {gpsError}
+                    <br /><br />
+                    O Move Bikes requer localização ativa para funcionar. Por favor, ative o GPS e conceda permissão de localização.
+                </p>
+                <button 
+                    onClick={() => window.location.reload()}
+                    className="px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 active:scale-95 transition-all"
+                >
+                    Tentar Novamente
+                </button>
+            </div>
+        );
+    }
 
     return (
         <div className="bg-white p-4 sm:p-6 rounded-xl shadow-lg w-full max-w-4xl mx-auto animate-fade-in-down">
@@ -1667,9 +1769,16 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
                                                         )}
                                                     </div>
                                                     {distance !== null && (
-                                                        <p className="text-[10px] text-gray-500 font-medium">
-                                                            {distance.toFixed(2)} km
-                                                        </p>
+                                                        <div className="flex flex-col items-start">
+                                                            <span className="text-[10px] font-bold text-blue-600">
+                                                                {routeDistances[bike] ? routeDistances[bike].distance : `${distance.toFixed(2)} km`}
+                                                            </span>
+                                                            {routeDistances[bike] && (
+                                                                <span className="text-[9px] text-gray-500">
+                                                                    {routeDistances[bike].duration}
+                                                                </span>
+                                                            )}
+                                                        </div>
                                                     )}
                                                 </div>
                                             </div>

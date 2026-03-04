@@ -51,11 +51,15 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
       if (mapRef.current) {
           const currentMarkers = markersRef.current;
           const activeDrivers = new Set<string>();
+          const bounds = new google.maps.LatLngBounds();
+          let hasLocations = false;
 
           locations.forEach(loc => {
               const { driverName, latitude, longitude } = loc;
               const position = { lat: latitude, lng: longitude };
               activeDrivers.add(driverName);
+              hasLocations = true;
+              bounds.extend(position);
 
               if (currentMarkers[driverName]) {
                   // Atualiza a posição usando o método `setPosition`, padrão da API clássica.
@@ -84,6 +88,17 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
                   });
               }
           });
+
+          // Ajusta o zoom para mostrar todos os motoristas apenas na primeira carga bem-sucedida
+          if (hasLocations && isLoading) {
+              mapRef.current.fitBounds(bounds);
+              // Se houver apenas um motorista, o fitBounds pode dar um zoom muito alto
+              if (locations.length === 1) {
+                  google.maps.event.addListenerOnce(mapRef.current, 'bounds_changed', () => {
+                      if (mapRef.current.getZoom() > 15) mapRef.current.setZoom(15);
+                  });
+              }
+          }
 
           // Remove marcadores de motoristas que ficaram offline usando `setMap(null)`.
           Object.keys(currentMarkers).forEach(driverName => {
@@ -116,6 +131,16 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
     return () => {
       isMounted = false;
       clearInterval(intervalId);
+      // Limpa os marcadores do mapa ao desmontar o componente
+      if (markersRef.current) {
+          Object.values(markersRef.current).forEach(marker => {
+              if (marker && typeof marker.setMap === 'function') {
+                  marker.setMap(null);
+              }
+          });
+          markersRef.current = {};
+      }
+      mapRef.current = null;
     };
   }, [fetchLocationsAndUpdateMap]);
 

@@ -63,6 +63,21 @@ export const checkApiConnection = async () => {
 export const apiGetCall = async (action: string, params: Record<string, string> = {}, retries = 1) => {
   const url = new URL(SCRIPT_URL);
   url.searchParams.append('action', action);
+  
+  // Inclui sessionId e userName se disponível
+  const sessionId = localStorage.getItem('bike_app_session_id');
+  if (sessionId) {
+    url.searchParams.append('sessionId', sessionId);
+  }
+
+  const savedUser = localStorage.getItem('bike_app_user');
+  if (savedUser) {
+    try {
+      const user = JSON.parse(savedUser);
+      if (user.name) url.searchParams.append('userName', user.name);
+    } catch { /* ignore */ }
+  }
+
   Object.entries(params).forEach(([key, value]) => url.searchParams.append(key, value));
 
   try {
@@ -93,6 +108,9 @@ export const apiGetCall = async (action: string, params: Record<string, string> 
     }
 
     if (result.success === false) { 
+      if (result.sessionExpired) {
+        window.dispatchEvent(new CustomEvent('session-expired', { detail: result.error }));
+      }
       throw new Error(result.error || 'O servidor (GET) retornou uma falha sem especificar o motivo.');
     }
     return result;
@@ -124,8 +142,37 @@ export const apiGetCall = async (action: string, params: Record<string, string> 
  * @param retries Número de tentativas em caso de falha (padrão 1).
  * @returns A resposta JSON do servidor.
  */
-export const apiCall = async (payload: object, retries = 1, silent = false): Promise<any> => {
+export const apiCall = async (payload: any, retries = 1, silent = false): Promise<any> => {
   try {
+    // Tenta obter o nome e sessionId do usuário logado
+    const savedUser = localStorage.getItem('bike_app_user');
+    let userName = '';
+    let storedSessionId = localStorage.getItem('bike_app_session_id');
+
+    if (savedUser) {
+      try {
+        const user = JSON.parse(savedUser);
+        userName = user.name;
+        if (!storedSessionId && user.sessionId) {
+          storedSessionId = user.sessionId;
+        }
+      } catch {
+        // Ignora erro de parse
+      }
+    }
+
+    const enrichedPayload = { ...payload };
+    
+    // Garante que o sessionId seja enviado se disponível
+    if (storedSessionId && !enrichedPayload.sessionId) {
+      enrichedPayload.sessionId = storedSessionId;
+    }
+
+    // Garante que a identidade do usuário seja enviada se disponível
+    if (userName && !enrichedPayload.login && !enrichedPayload.driverName && !enrichedPayload.userName) {
+      enrichedPayload.userName = userName;
+    }
+
     const response = await fetchWithTimeout(SCRIPT_URL, {
       method: 'POST',
       mode: 'cors',
@@ -134,7 +181,7 @@ export const apiCall = async (payload: object, retries = 1, silent = false): Pro
       headers: {
         'Content-Type': 'text/plain;charset=utf-8',
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(enrichedPayload),
       redirect: 'follow', // Essencial para seguir o redirecionamento do Google
       // ATUALIZAÇÃO: Timeout aumentado para 60 segundos para operações que podem demorar mais.
       timeout: 60000, 
@@ -162,6 +209,9 @@ export const apiCall = async (payload: object, retries = 1, silent = false): Pro
     }
 
     if (result.success === false) { 
+      if (result.sessionExpired) {
+        window.dispatchEvent(new CustomEvent('session-expired', { detail: result.error }));
+      }
       throw new Error(result.error || 'O servidor retornou uma falha sem especificar o motivo.');
     }
 

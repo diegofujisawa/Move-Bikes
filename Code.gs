@@ -561,19 +561,55 @@ function createRequest(patrimonio, ocorrencia, local, recipient) {
   if (!patrimonio || !ocorrencia || !local || !recipient) {
     return { success: false, error: "Todos os campos (patrimônio, ocorrência, local, destinatário) são obrigatórios." };
   }
-  const sheet = ss.getSheetByName(REQUESTS_SHEET_NAME);
-  if (!sheet) throw new Error(`Planilha "${REQUESTS_SHEET_NAME}" não encontrada.`);
-
-  const newRow = new Array(sheet.getLastColumn()).fill('');
-  newRow[COLUMN_INDICES.REQUESTS.TIMESTAMP - 1] = new Date();
-  newRow[COLUMN_INDICES.REQUESTS.PATRIMONIO - 1] = patrimonio;
-  newRow[COLUMN_INDICES.REQUESTS.OCORRENCIA - 1] = ocorrencia;
-  newRow[COLUMN_INDICES.REQUESTS.LOCAL - 1] = local;
-  newRow[COLUMN_INDICES.REQUESTS.SITUACAO - 1] = 'Pendente';
-  newRow[COLUMN_INDICES.REQUESTS.DESTINATARIO - 1] = recipient;
   
-  sheet.appendRow(newRow);
-  return { success: true, message: 'Solicitação criada com sucesso.' };
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sheet = ss.getSheetByName(REQUESTS_SHEET_NAME);
+    if (!sheet) throw new Error(`Planilha "${REQUESTS_SHEET_NAME}" não encontrada.`);
+
+    // PREVENÇÃO DE DUPLICIDADE: Verifica se já existe uma solicitação PENDENTE para este patrimônio
+    if (sheet.getLastRow() >= 2) {
+      const data = sheet.getRange(2, COLUMN_INDICES.REQUESTS.PATRIMONIO, sheet.getLastRow() - 1, COLUMN_INDICES.REQUESTS.SITUACAO - COLUMN_INDICES.REQUESTS.PATRIMONIO + 1).getValues();
+      const patrimonioStr = patrimonio.toString().trim();
+      
+      for (let i = 0; i < data.length; i++) {
+        const rowPatrimonio = (data[i][0] || '').toString().trim();
+        const rowStatus = (data[i][COLUMN_INDICES.REQUESTS.SITUACAO - COLUMN_INDICES.REQUESTS.PATRIMONIO] || '').toString().trim().toLowerCase();
+        
+        if (rowPatrimonio === patrimonioStr && rowStatus === 'pendente') {
+          return { success: false, error: `Já existe uma solicitação pendente para a bicicleta ${patrimonio}.` };
+        }
+      }
+    }
+
+    let finalLocal = local;
+    // Se o local não contiver coordenadas, tenta buscar a posição atual da primeira bike
+    if (!local.match(/(-?\d+[.,]\d+)\s*[,;]\s*(-?\d+[.,]\d+)/)) {
+      try {
+        const firstBike = patrimonio.toString().split(',')[0].trim();
+        const bikeInfo = searchBike(firstBike);
+        if (bikeInfo.success && bikeInfo.data.Latitude && bikeInfo.data.Longitude) {
+          finalLocal = `${local} (${bikeInfo.data.Latitude};${bikeInfo.data.Longitude})`;
+        }
+      } catch (e) {
+        Logger.log("Erro ao tentar obter coordenadas iniciais para a solicitação: " + e.message);
+      }
+    }
+
+    const newRow = new Array(sheet.getLastColumn()).fill('');
+    newRow[COLUMN_INDICES.REQUESTS.TIMESTAMP - 1] = new Date();
+    newRow[COLUMN_INDICES.REQUESTS.PATRIMONIO - 1] = patrimonio;
+    newRow[COLUMN_INDICES.REQUESTS.OCORRENCIA - 1] = ocorrencia;
+    newRow[COLUMN_INDICES.REQUESTS.LOCAL - 1] = finalLocal;
+    newRow[COLUMN_INDICES.REQUESTS.SITUACAO - 1] = 'Pendente';
+    newRow[COLUMN_INDICES.REQUESTS.DESTINATARIO - 1] = recipient;
+    
+    sheet.appendRow(newRow);
+    return { success: true, message: 'Solicitação criada com sucesso.' };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function declineRequest(requestId, driverName) {
@@ -716,34 +752,41 @@ function logReport(rowData) {
   if (!Array.isArray(rowData) || rowData.length === 0) {
     return { success: false, error: "Dados do relatório inválidos ou ausentes." };
   }
-  const sheet = ss.getSheetByName(REPORT_SHEET_NAME);
-  if (!sheet) throw new Error(`Planilha "${REPORT_SHEET_NAME}" não encontrada.`);
-
-  sheet.appendRow(rowData);
-
-  // Lógica para "Não encontrada"
-  const patrimonio = rowData[COLUMN_INDICES.REPORTS.PATRIMONIO - 1];
-  const status = (rowData[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim();
-  const observacao = (rowData[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim();
-  const motorista = (rowData[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
   
-  // Sincroniza com a aba de Solicitações para o histórico
-  syncWithRequests(patrimonio, status, observacao, motorista);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000); // Timeout maior para relatórios
+  try {
+    const sheet = ss.getSheetByName(REPORT_SHEET_NAME);
+    if (!sheet) throw new Error(`Planilha "${REPORT_SHEET_NAME}" não encontrada.`);
 
-  const statusLower = status.toLowerCase();
-  if (statusLower === 'não encontrada' || statusLower === 'nao encontrada') {
-    updateAlertsSheet(patrimonio);
-    updateOcorrenciaSheet(rowData);
-  } else if (statusLower === 'vandalizada') {
-    updateVandalizedSheet(patrimonio, rowData);
-    updateVandalismoSheet(rowData);
-  } else {
-    // Se a bike for registrada com qualquer outro status, ela foi "encontrada"
-    resolveAlert(patrimonio, motorista || 'Sistema');
-    resolveVandalized(patrimonio, motorista || 'Sistema');
+    sheet.appendRow(rowData);
+
+    // Lógica para "Não encontrada"
+    const patrimonio = rowData[COLUMN_INDICES.REPORTS.PATRIMONIO - 1];
+    const status = (rowData[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim();
+    const observacao = (rowData[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim();
+    const motorista = (rowData[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
+    
+    // Sincroniza com a aba de Solicitações para o histórico
+    syncWithRequests(patrimonio, status, observacao, motorista);
+
+    const statusLower = status.toLowerCase();
+    if (statusLower === 'não encontrada' || statusLower === 'nao encontrada') {
+      updateAlertsSheet(patrimonio);
+      updateOcorrenciaSheet(rowData);
+    } else if (statusLower === 'vandalizada') {
+      updateVandalizedSheet(patrimonio, rowData);
+      updateVandalismoSheet(rowData);
+    } else {
+      // Se a bike for registrada com qualquer outro status, ela foi "encontrada"
+      resolveAlert(patrimonio, motorista || 'Sistema');
+      resolveVandalized(patrimonio, motorista || 'Sistema');
+    }
+
+    return { success: true };
+  } finally {
+    lock.releaseLock();
   }
-
-  return { success: true };
 }
 
 /**
@@ -1376,39 +1419,45 @@ function finalizeCollectedBike(request) {
 }
 
 function updateDriverState(driverName, routeBikes, collectedBikes) {
-  const sheet = ss.getSheetByName(STATE_SHEET_NAME);
-  if (!sheet) throw new Error(`Planilha "${STATE_SHEET_NAME}" não encontrada.`);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const sheet = ss.getSheetByName(STATE_SHEET_NAME);
+    if (!sheet) throw new Error(`Planilha "${STATE_SHEET_NAME}" não encontrada.`);
 
-  const driverCol = COLUMN_INDICES.STATE.MOTORISTA;
-  const lastRow = sheet.getLastRow();
-  let rowIndex = -1;
+    const driverCol = COLUMN_INDICES.STATE.MOTORISTA;
+    const lastRow = sheet.getLastRow();
+    let rowIndex = -1;
 
-  if (lastRow >= 2) {
-    const driverColumnRange = sheet.getRange(2, driverCol, lastRow - 1, 1);
-    const textFinder = driverColumnRange.createTextFinder(String(driverName).trim()).matchEntireCell(true);
-    const foundCell = textFinder.findNext();
-    if (foundCell) {
-      rowIndex = foundCell.getRow();
+    if (lastRow >= 2) {
+      const driverColumnRange = sheet.getRange(2, driverCol, lastRow - 1, 1);
+      const textFinder = driverColumnRange.createTextFinder(String(driverName).trim()).matchEntireCell(true);
+      const foundCell = textFinder.findNext();
+      if (foundCell) {
+        rowIndex = foundCell.getRow();
+      }
     }
+
+    const routeString = Array.isArray(routeBikes) ? routeBikes.join(', ') : '';
+    const collectedString = Array.isArray(collectedBikes) ? collectedBikes.join(', ') : '';
+
+    if (rowIndex !== -1) {
+      // Atualiza a linha existente
+      sheet.getRange(rowIndex, COLUMN_INDICES.STATE.ROTEIRO).setValue(routeString);
+      sheet.getRange(rowIndex, COLUMN_INDICES.STATE.RECOLHIDAS).setValue(collectedString);
+    } else {
+      // Adiciona uma nova linha se o motorista não existir
+      const newRow = new Array(sheet.getLastColumn()).fill('');
+      newRow[COLUMN_INDICES.STATE.MOTORISTA - 1] = driverName;
+      newRow[COLUMN_INDICES.STATE.ROTEIRO - 1] = routeString;
+      newRow[COLUMN_INDICES.STATE.RECOLHIDAS - 1] = collectedString;
+      sheet.appendRow(newRow);
+    }
+
+    return { success: true };
+  } finally {
+    lock.releaseLock();
   }
-
-  const routeString = Array.isArray(routeBikes) ? routeBikes.join(', ') : '';
-  const collectedString = Array.isArray(collectedBikes) ? collectedBikes.join(', ') : '';
-
-  if (rowIndex !== -1) {
-    // Atualiza a linha existente
-    sheet.getRange(rowIndex, COLUMN_INDICES.STATE.ROTEIRO).setValue(routeString);
-    sheet.getRange(rowIndex, COLUMN_INDICES.STATE.RECOLHIDAS).setValue(collectedString);
-  } else {
-    // Adiciona uma nova linha se o motorista não existir
-    const newRow = new Array(sheet.getLastColumn()).fill('');
-    newRow[COLUMN_INDICES.STATE.MOTORISTA - 1] = driverName;
-    newRow[COLUMN_INDICES.STATE.ROTEIRO - 1] = routeString;
-    newRow[COLUMN_INDICES.STATE.RECOLHIDAS - 1] = collectedString;
-    sheet.appendRow(newRow);
-  }
-
-  return { success: true };
 }
 
 
@@ -1551,20 +1600,25 @@ function getRouteDetails(driverName, bikeNumbers) {
   // Get initial data from REQUESTS sheet
   // We look for the most recent 'Aceita' request for each bike by this driver
   for (let i = requestsData.length - 1; i >= 1; i--) {
-    const patrimonio = String(requestsData[i][COLUMN_INDICES.REQUESTS.PATRIMONIO - 1]).trim();
+    const patrimonioRaw = String(requestsData[i][COLUMN_INDICES.REQUESTS.PATRIMONIO - 1]).trim();
     const acceptedBy = String(requestsData[i][COLUMN_INDICES.REQUESTS.ACEITA_POR - 1]).trim().toLowerCase();
     const situacao = String(requestsData[i][COLUMN_INDICES.REQUESTS.SITUACAO - 1]).trim().toLowerCase();
     
-    if (bikeNumberSet.has(patrimonio) && acceptedBy === driverName.toLowerCase() && situacao === 'aceita') {
-      if (result[patrimonio] && result[patrimonio].initialLat === null) {
-        const local = String(requestsData[i][COLUMN_INDICES.REQUESTS.LOCAL - 1]);
-        const coordsMatch = local.match(/(-?\d+[.,]\d+)\s*[,;]\s*(-?\d+[.,]\d+)/);
-        if (coordsMatch) {
-          result[patrimonio].initialLat = parseCoordinate(coordsMatch[1]);
-          result[patrimonio].initialLng = parseCoordinate(coordsMatch[2]);
+    // Trata casos onde há múltiplas bikes na mesma solicitação (separadas por vírgula)
+    const rowBikes = patrimonioRaw.split(',').map(s => s.trim()).filter(Boolean);
+    
+    rowBikes.forEach(patrimonio => {
+      if (bikeNumberSet.has(patrimonio) && acceptedBy === driverName.toLowerCase() && situacao === 'aceita') {
+        if (result[patrimonio] && result[patrimonio].initialLat === null) {
+          const local = String(requestsData[i][COLUMN_INDICES.REQUESTS.LOCAL - 1]);
+          const coordsMatch = local.match(/(-?\d+[.,]\d+)\s*[,;]\s*(-?\d+[.,]\d+)/);
+          if (coordsMatch) {
+            result[patrimonio].initialLat = parseCoordinate(coordsMatch[1]);
+            result[patrimonio].initialLng = parseCoordinate(coordsMatch[2]);
+          }
         }
       }
-    }
+    });
   }
 
   return { success: true, data: result };

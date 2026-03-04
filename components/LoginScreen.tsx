@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BicycleIcon, UserIcon, LockClosedIcon, AlertTriangleIcon } from './icons';
+import { BicycleIcon, UserIcon, AlertTriangleIcon } from './icons';
 import { User } from '../types';
 import { apiCall, checkApiConnection } from '../api';
 
@@ -9,7 +9,6 @@ interface LoginScreenProps {
 
 const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
   const [login, setLogin] = useState('');
-  const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'testing' | 'ok' | 'error'>('testing');
@@ -54,7 +53,6 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
       const result = await apiCall({
         action: 'login',
         login: login.trim(),
-        password: password,
       });
 
       if (result.user) {
@@ -154,25 +152,6 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
               placeholder="Digite seu login"
               required
               autoCapitalize="none"
-              disabled={connectionStatus !== 'ok'}
-            />
-          </div>
-        </div>
-        <div>
-          <label htmlFor="password" className="block text-sm font-medium text-gray-700">
-            Senha
-          </label>
-          <div className="mt-1 relative rounded-md shadow-sm">
-             <div className="pointer-events-none absolute inset-y-0 left-0 pl-3 flex items-center">
-                <LockClosedIcon className="h-5 w-5 text-gray-400" />
-            </div>
-            <input
-              type="password"
-              id="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="block w-full pl-10 pr-3 py-3 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-              placeholder="Digite sua senha"
               disabled={connectionStatus !== 'ok'}
             />
           </div>

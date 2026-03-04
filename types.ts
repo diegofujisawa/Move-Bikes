@@ -13,20 +13,20 @@ export enum FinalStatus {
 
 export interface User {
   name: string;
-  category: 'MOTORISTA' | 'ADM' | string; // string for flexibility
+  category: string; 
 }
 
 export interface BicycleData {
-  id: number | string;
-  localizacao: string;
-  status: string;
-  usuario: string;
-  bateria: string;
-  trava: string;
-  carregamento: string;
-  ultima_informacao: string;
-  latitude: number | string;
-  longitude: number | string;
+  'Patrimônio': string;
+  'Status': string;
+  'Localidade': string;
+  'Usuário': string;
+  'Bateria': string;
+  'Trava': string;
+  'Carregamento': string;
+  'Última informação da posição': string;
+  'Latitude': number;
+  'Longitude': number;
   [key: string]: any; 
 }
 
@@ -42,26 +42,14 @@ export interface ReportPayload {
 }
 
 export interface PickupRequest {
-  id: string; // ID único da solicitação (ex: linha da planilha)
+  id: number; // ID único da solicitação (linha da planilha)
   bikeNumber: string;
   timestamp: string;
-  status: string; // Alterado para string para maior flexibilidade
-  location: string; // Localização informada pelo solicitante
-  reason: string; // Motivo informado pelo solicitante
-  acceptedBy?: string; // Nome do motorista que aceitou
-  recipient?: string; // Para quem a notificação é destinada
-  bikeData?: BicycleData; 
-}
-
-export interface PickupRequest {
-  id: string; // ID único da solicitação (ex: linha da planilha)
-  bikeNumber: string;
-  timestamp: string;
-  status: string; // Alterado para string para maior flexibilidade
-  location: string; // Localização informada pelo solicitante
-  reason: string; // Motivo informado pelo solicitante
-  acceptedBy?: string; // Nome do motorista que aceitou
-  recipient?: string; // Para quem a notificação é destinada
+  status: string; 
+  location: string; 
+  reason: string; 
+  acceptedBy?: string; 
+  recipient?: string; 
   bikeData?: BicycleData; 
 }
 
