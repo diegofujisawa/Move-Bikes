@@ -137,6 +137,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
     const [requestsHistory, setRequestsHistory] = useState<any[]>([]);
     const [isHistoryLoading, setIsHistoryLoading] = useState(false);
     const isUpdatingStateRef = useRef(false);
+    const lastLocationUpdateRef = useRef<number>(0);
 
     const fetchAlerts = async () => {
         if (!category.includes('ADM')) return;
@@ -888,8 +889,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
     };
 
     const fetchRouteDetails = async () => {
-        if (routeBikes.length === 0) {
-            setRouteBikesDetails({});
+        if (routeBikes.length === 0 || document.visibilityState === 'hidden') {
+            if (routeBikes.length === 0) setRouteBikesDetails({});
             return;
         }
         try {
@@ -897,19 +898,16 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
             if (result.success && result.data) {
                 setRouteBikesDetails(prev => {
                     const newData = { ...result.data };
-                    // Fallback: se o backend não enviou posição inicial, tenta manter a que já tínhamos
-                    // ou usa a primeira posição atual recebida como inicial para futuras comparações.
                     Object.keys(newData).forEach(bikeId => {
-                        if (newData[bikeId].initialLat === null) {
-                            if (prev[bikeId] && prev[bikeId].initialLat !== null) {
-                                newData[bikeId].initialLat = prev[bikeId].initialLat;
-                                newData[bikeId].initialLng = prev[bikeId].initialLng;
-                            } else if (prev[bikeId] && prev[bikeId].currentLat !== null) {
-                                // Se não tínhamos inicial, mas tínhamos uma posição atual anterior,
-                                // usamos ela como inicial para começar a detectar movimento a partir de agora.
-                                newData[bikeId].initialLat = prev[bikeId].currentLat;
-                                newData[bikeId].initialLng = prev[bikeId].currentLng;
-                            }
+                        // OTIMIZAÇÃO: Preserva a posição inicial original para detectar movimento acumulado.
+                        // Só define a inicial se ela ainda for nula.
+                        if (prev[bikeId] && prev[bikeId].initialLat !== null) {
+                            newData[bikeId].initialLat = prev[bikeId].initialLat;
+                            newData[bikeId].initialLng = prev[bikeId].initialLng;
+                        } else if (newData[bikeId].initialLat === null) {
+                            // Se o backend não mandou e não tínhamos antes, usa a posição atual como ponto de partida.
+                            newData[bikeId].initialLat = newData[bikeId].currentLat;
+                            newData[bikeId].initialLng = newData[bikeId].currentLng;
                         }
                     });
                     return newData;
@@ -1052,12 +1050,16 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
                 setGpsError(null);
                 setCurrentDriverLocation({ lat: latitude, lng: longitude });
                 
-                // Atualiza a localização no servidor de forma silenciosa
-                apiGetCall('updateLocation', {
-                    driverName,
-                    latitude: latitude.toFixed(6),
-                    longitude: longitude.toFixed(6)
-                }).catch(err => console.error("Falha ao atualizar a localização:", err));
+                // OTIMIZAÇÃO: Throttle de 10 segundos para atualizações de localização no servidor
+                const now = Date.now();
+                if (now - lastLocationUpdateRef.current > 10000) {
+                    lastLocationUpdateRef.current = now;
+                    apiGetCall('updateLocation', {
+                        driverName,
+                        latitude: latitude.toFixed(6),
+                        longitude: longitude.toFixed(6)
+                    }).catch(err => console.error("Falha ao atualizar a localização:", err));
+                }
             },
             (err) => {
                 console.warn(`Erro de Geolocalização (${err.code}): ${err.message}`);
@@ -1083,9 +1085,16 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
         };
     }, [driverName, category]);
 
+    const lastDistanceMatrixUpdateRef = useRef<number>(0);
+
     // Efeito para calcular distâncias reais via Google Maps Distance Matrix
     useEffect(() => {
         if (!currentDriverLocation || routeBikes.length === 0 || !window.google) return;
+
+        // OTIMIZAÇÃO: Throttle de 10 segundos para chamadas ao Google Maps Distance Matrix
+        const now = Date.now();
+        if (now - lastDistanceMatrixUpdateRef.current < 10000) return;
+        lastDistanceMatrixUpdateRef.current = now;
 
         const service = new google.maps.DistanceMatrixService();
         const origins = [new google.maps.LatLng(currentDriverLocation.lat, currentDriverLocation.lng)];
@@ -1764,7 +1773,9 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, onLogout,
                                                                 <MovingIcon className="w-3.5 h-3.5" />
                                                                 {movedDistanceMeters > 100 && <MovingIcon className="w-3.5 h-3.5" />}
                                                                 {movedDistanceMeters > 1000 && <MovingIcon className="w-3.5 h-3.5" />}
-                                                                <span className="text-[10px] font-bold uppercase ml-1">Movendo</span>
+                                                                <span className="text-[10px] font-bold uppercase ml-1">
+                                                                    Movendo ({movedDistanceMeters > 1000 ? `${(movedDistanceMeters/1000).toFixed(1)}km` : `${movedDistanceMeters.toFixed(0)}m`})
+                                                                </span>
                                                             </div>
                                                         )}
                                                     </div>
