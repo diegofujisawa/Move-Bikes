@@ -216,7 +216,10 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
         </div>
 
         <div className="pt-4 border-t border-gray-100">
-          <p className="text-xs font-bold text-gray-400 uppercase mb-3">Informações do Veículo</p>
+          <div className="flex justify-between items-center mb-3">
+            <p className="text-xs font-bold text-gray-400 uppercase">Informações do Veículo</p>
+            <span className="text-[10px] bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">Apenas Motoristas</span>
+          </div>
           <div className="grid grid-cols-1 gap-4">
             <div>
               <label htmlFor="plate" className="block text-sm font-medium text-gray-700">
@@ -227,7 +230,6 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
                 value={plate}
                 onChange={handlePlateChange}
                 className="mt-1 block w-full pl-3 pr-10 py-3 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md"
-                required
                 disabled={connectionStatus !== 'ok' || isLoadingPlates}
               >
                 <option value="">Selecione a placa</option>
@@ -250,10 +252,8 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
                 onChange={(e) => setKmInicial(e.target.value)}
                 className="mt-1 block w-full px-3 py-3 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
                 placeholder="KM do odômetro"
-                required
                 disabled={connectionStatus !== 'ok'}
               />
-              <p className="text-[10px] text-gray-400 mt-1 italic">Deve ser igual ao KM final do último turno.</p>
             </div>
           </div>
         </div>
@@ -266,13 +266,13 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
 
         <button
           type="submit"
-          disabled={!login.trim() || !plate || !kmInicial || isLoading || connectionStatus !== 'ok'}
+          disabled={!login.trim() || isLoading || connectionStatus !== 'ok'}
           className="w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors mt-6"
         >
           {isLoading ? (
             <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
           ) : (
-            'Entrar e Iniciar Turno'
+            'Entrar no Sistema'
           )}
         </button>
       </form>

@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { DailyActivity, BicycleData, PickupRequest, DriverLocation } from '../types';
-import { LogoutIcon, PlusIcon, PlusPlusIcon, MapIcon, SheetIcon, SearchIcon, AlertIcon, CalendarIcon, CarIcon, XIcon, BicycleIcon, MovingIcon, UserIcon, AlertTriangleIcon } from './icons';
+import { LogoutIcon, PlusIcon, PlusPlusIcon, MapIcon, SheetIcon, SearchIcon, AlertIcon, CalendarIcon, CarIcon, XIcon, BicycleIcon, MovingIcon, UserIcon, AlertTriangleIcon, RefreshIcon } from './icons';
 import ScheduleModal from './ScheduleModal';
 import ReporModal from './ReporModal';
 import RequestModal from './RequestModal';
@@ -9,7 +9,10 @@ import ReportModal from './ReportModal';
 import RouteModal from './RouteModal';
 import DestinationModal from './DestinationModal';
 import HistoryModal from './HistoryModal';
+import VehicleSwitchModal from './VehicleSwitchModal';
+import AdminAlerts from './AdminAlerts';
 import { apiCall, apiGetCall } from '../api';
+import { User } from '../types';
 
 interface MainScreenProps {
   driverName: string;
@@ -17,6 +20,7 @@ interface MainScreenProps {
   kmInicial?: number;
   onLogout: () => void;
   onShowMap: () => void; // Prop para mostrar o mapa
+  onUpdateUser: (updates: Partial<User>) => void;
 }
 
 const normalizeCoord = (coord: number): number => {
@@ -50,7 +54,7 @@ const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: numbe
     return R * c; // Distance in km
 };
 
-const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, kmInicial, onLogout, onShowMap }) => {
+const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, kmInicial, onLogout, onShowMap, onUpdateUser }) => {
     const [gpsError, setGpsError] = useState<string | null>(null);
     const [routeDistances, setRouteDistances] = useState<Record<string, { distance: string, duration: string, value: number }>>({});
     const [dailyActivity] = useState<DailyActivity>({
@@ -69,6 +73,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, kmInicial
     const [isRequestModalOpen, setRequestModalOpen] = useState(false);
     const [isRouteModalOpen, setRouteModalOpen] = useState(false);
     const [isReportModalOpen, setReportModalOpen] = useState(false);
+    const [isVehicleModalOpen, setIsVehicleModalOpen] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
     const [searchedBike, setSearchedBike] = useState<BicycleData | null>(null);
     const [isSearching, setIsSearching] = useState(false);
@@ -111,6 +116,10 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, kmInicial
     };
 
     const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
+    const [isAdminAlertsOpen, setIsAdminAlertsOpen] = useState(false);
+    const [alertCount, setAlertCount] = useState(0);
+    const [hasNewAlerts, setHasNewAlerts] = useState(false);
+    const [lastViewedAlertCount, setLastViewedAlertCount] = useState(0);
     const [isReporModalOpen, setIsReporModalOpen] = useState(false);
     const [reporData, setReporData] = useState<any[]>([]);
     const [isReporLoading, setIsReporLoading] = useState(false);
@@ -306,6 +315,27 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, kmInicial
             fetchDriversSummary();
         }
     }, [summaryTimeRange]);
+
+    useEffect(() => {
+        const fetchAlertCount = async () => {
+            if (!driverName) return;
+            try {
+                const response = await apiCall({ action: 'getAdminAlerts', adminName: driverName }, 1, true);
+                if (response.success) {
+                    const newCount = response.alerts?.length || 0;
+                    setAlertCount(newCount);
+                    if (newCount > lastViewedAlertCount) {
+                        setHasNewAlerts(true);
+                    }
+                }
+            } catch {
+                // Silent error for polling
+            }
+        };
+        fetchAlertCount();
+        const interval = setInterval(fetchAlertCount, 60000); // Poll every minute
+        return () => clearInterval(interval);
+    }, [driverName, lastViewedAlertCount]);
 
     const runDriversSummaryFallback = async () => {
         const currentRange = summaryTimeRange;
@@ -578,7 +608,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, kmInicial
     const formatBattery = (value: any) => {
         const num = parseFloat(value);
         if (isNaN(num)) return value;
-        return `${Math.round(num * 100)}%`;
+        const finalVal = num > 1 ? Math.round(num) : Math.round(num * 100);
+        return `${finalVal}%`;
     };
 
     const formatCoordinate = (coord: any): string => {
@@ -1216,44 +1247,72 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, kmInicial
                     </div>
                 </div>
                 <div className="flex items-center flex-wrap gap-1 mt-4 sm:mt-0">
-                    <button onClick={() => setRequestModalOpen(true)} title="Nova Solicitação" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
-                                <PlusIcon className="w-6 h-6 sm:w-7 sm:h-7"/>
-                            </button>
-                            <button onClick={() => setRouteModalOpen(true)} title="Criar Roteiro" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
-                                <PlusPlusIcon className="w-6 h-6 sm:w-7 sm:h-7" />
-                            </button>
+                    <button onClick={() => setRequestModalOpen(true)} disabled={isLoading} title="Nova Solicitação" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
+                        <PlusIcon className="w-6 h-6 sm:w-7 sm:h-7"/>
+                    </button>
+                    <button onClick={() => setRouteModalOpen(true)} disabled={isLoading} title="Criar Roteiro" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
+                        <PlusPlusIcon className="w-6 h-6 sm:w-7 sm:h-7" />
+                    </button>
+                    <button 
+                        onClick={() => {
+                            setIsAdminAlertsOpen(true);
+                            setHasNewAlerts(false);
+                            setLastViewedAlertCount(alertCount);
+                        }} 
+                        disabled={isLoading} 
+                        title="Alertas de Divergência" 
+                        className={`p-1.5 sm:p-2 rounded-full transition-colors relative disabled:opacity-50 ${
+                            hasNewAlerts && alertCount > 0 
+                                ? 'text-red-600 bg-red-50 animate-pulse' 
+                                : 'text-gray-500 hover:bg-gray-100 hover:text-red-600'
+                        }`}
+                    >
+                        <AlertTriangleIcon className={`w-6 h-6 sm:w-7 sm:h-7 ${hasNewAlerts && alertCount > 0 ? 'animate-bounce' : ''}`}/>
+                        {alertCount > 0 && (
+                            <span className="absolute top-0 right-0 bg-red-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full border-2 border-white">
+                                {alertCount}
+                            </span>
+                        )}
+                    </button>
                             {category.includes('ADM') && (
-                                <button onClick={onShowMap} title="Ver Mapa em Tempo Real" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
+                                <button onClick={onShowMap} disabled={isLoading} title="Ver Mapa em Tempo Real" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
                                     <MapIcon className="w-6 h-6 sm:w-7 sm:h-7"/>
                                 </button>
                             )}
                             {category.toUpperCase() === 'MOTORISTA' && (
-                                <button onClick={() => { fetchSchedule(); setIsScheduleModalOpen(true); }} title="Minha Escala" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
+                                <button onClick={() => setIsVehicleModalOpen(true)} disabled={isLoading} title="Trocar Veículo" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
+                                    <RefreshIcon className="w-6 h-6 sm:w-7 sm:h-7" />
+                                </button>
+                            )}
+                            {category.toUpperCase() === 'MOTORISTA' && (
+                                <button onClick={() => { fetchSchedule(); setIsScheduleModalOpen(true); }} disabled={isLoading} title="Minha Escala" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
                                     <CalendarIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                                 </button>
                             )}
                             {!category.includes('ADM') && (
                                 <button 
                                     onClick={() => window.open('https://docs.google.com/forms/d/e/1FAIpQLSdYtWC_KKixt9gWwZG_Q6hyaD2QCvv-_ilOfhtUVJiF5EevSQ/viewform', '_blank')} 
+                                    disabled={isLoading}
                                     title="Formulário Veículo" 
-                                    className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors"
+                                    className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50"
                                 >
                                     <CarIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                                 </button>
                             )}
                      {!category.includes('ADM') && (
-                        <button onClick={() => setReportModalOpen(true)} title="Gerar Relatório" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors">
+                        <button onClick={() => setReportModalOpen(true)} disabled={isLoading} title="Gerar Relatório" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
                             <SheetIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                         </button>
                      )}
                     <button 
                         onClick={() => { fetchReporData(); setIsReporModalOpen(true); }}
-                        className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors"
+                        disabled={isLoading}
+                        className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50"
                         title="Estações Livres"
                     >
                         <BicycleIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                     </button>
-                    <button onClick={onLogout} title="Sair" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-red-600 transition-colors">
+                    <button onClick={onLogout} disabled={isLoading} title="Sair" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-red-600 transition-colors disabled:opacity-50">
                         <LogoutIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                     </button>
                 </div>
@@ -1715,28 +1774,28 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, kmInicial
                                                 )}
                                             </div>
                                         </div>
-
-                                        {/* Filial */}
-                                        <div className="bg-white p-3 rounded-lg border shadow-sm">
-                                            <div className="flex justify-between items-center mb-2">
-                                                <h4 className="text-sm font-bold text-blue-700 uppercase tracking-wider">Filial</h4>
-                                                <button 
-                                                    onClick={() => copyToClipboard(changeStatusData.filial)}
-                                                    className="px-2 py-1 bg-gray-100 text-gray-600 text-[10px] font-bold rounded hover:bg-gray-200 transition-colors flex items-center gap-1"
-                                                >
-                                                    <SheetIcon className="w-3 h-3" /> Copiar Lista
-                                                </button>
-                                            </div>
-                                            <div className="max-h-[200px] overflow-y-auto bg-gray-50 rounded p-2 border border-dashed">
-                                                {changeStatusData.filial.length > 0 ? (
-                                                    <p className="text-xs font-mono break-all text-gray-600 leading-relaxed">
+ 
+                                         {/* Filial */}
+                                         <div className="bg-white p-3 rounded-lg border shadow-sm">
+                                             <div className="flex justify-between items-center mb-2">
+                                                 <h4 className="text-sm font-bold text-blue-700 uppercase tracking-wider">Filial</h4>
+                                                 <button 
+                                                     onClick={() => copyToClipboard(changeStatusData.filial)}
+                                                     className="px-2 py-1 bg-gray-100 text-gray-600 text-[10px] font-bold rounded hover:bg-gray-200 transition-colors flex items-center gap-1"
+                                                 >
+                                                     <SheetIcon className="w-3 h-3" /> Copiar Lista
+                                                 </button>
+                                             </div>
+                                             <div className="max-h-[200px] overflow-y-auto bg-gray-50 rounded p-2 border border-dashed">
+                                                 {changeStatusData.filial.length > 0 ? (
+                                                     <p className="text-xs font-mono break-all text-gray-600 leading-relaxed">
                                                         {changeStatusData.filial.join(',')}
-                                                    </p>
-                                                ) : (
-                                                    <p className="text-xs text-gray-400 italic text-center py-4">Nenhuma bike na filial.</p>
-                                                )}
-                                            </div>
-                                        </div>
+                                                     </p>
+                                                 ) : (
+                                                     <p className="text-xs text-gray-400 italic text-center py-4">Nenhuma bike na filial.</p>
+                                                 )}
+                                             </div>
+                                         </div>
                                     </div>
                                 </div>
                             </div>
@@ -1896,6 +1955,19 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, kmInicial
                 onClose={() => setIsScheduleModalOpen(false)}
                 schedule={userSchedule}
                 driverName={driverName}
+            />
+
+            <VehicleSwitchModal 
+                isOpen={isVehicleModalOpen}
+                onClose={() => setIsVehicleModalOpen(false)}
+                onSwitch={(plate, km) => onUpdateUser({ plate, kmInicial: km })}
+                driverName={driverName}
+            />
+
+            <AdminAlerts 
+                isOpen={isAdminAlertsOpen}
+                onClose={() => setIsAdminAlertsOpen(false)}
+                adminName={driverName}
             />
 
             <ReporModal

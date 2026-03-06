@@ -75,6 +75,7 @@ const App: React.FC = () => {
               category={user.category} 
               kmInicial={user.kmInicial}
               onLogout={handleLogout}
+              onUpdateUser={(updates) => setUser(prev => prev ? { ...prev, ...updates } : null)}
               // Passa a função para a MainScreen poder abrir o mapa
               onShowMap={() => setIsMapVisible(true)}
             />

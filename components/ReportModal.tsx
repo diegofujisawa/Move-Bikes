@@ -18,6 +18,7 @@ const ReportModal: React.FC<ReportModalProps> = ({ isOpen, onClose, driverName, 
   const [copyButtonText, setCopyButtonText] = useState('Copiar');
   const [kmFinal, setKmFinal] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [reportData, setReportData] = useState<any>(null);
 
   const fetchAndGenerateReport = async () => {
     setReportText('Gerando relatório...');
@@ -25,45 +26,60 @@ const ReportModal: React.FC<ReportModalProps> = ({ isOpen, onClose, driverName, 
       const result = await apiCall({ action: 'getDailyReportData', driverName });
       if (result.success && result.data) {
         const data = result.data;
+        setReportData(data);
         const today = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' });
 
         const formatList = (list?: string[]) => (list && list.length > 0) ? list.join(', ') : 'Nenhuma';
         const formatMultilineList = (list?: string[]) => (list && list.length > 0) ? list.join('\n') : 'Nenhuma';
 
+        // Calcula KM rodado total (incluindo a sessão atual se o KM Final foi digitado)
+        let totalKm = data.totalKmRodado || 0;
         const kmFinalNum = parseFloat(kmFinal) || 0;
-        const kmRodado = kmInicial !== undefined ? (kmFinalNum - kmInicial).toFixed(1) : 'N/A';
+        if (kmFinalNum > 0 && kmInicial !== undefined) {
+          const currentDiff = kmFinalNum - kmInicial;
+          if (currentDiff > 0) {
+            totalKm += currentDiff;
+          }
+        }
 
-        const report = `Plantão ${driverName}
-   ${today}
-   🚗 *KM Inicial:* ${kmInicial ?? 'N/A'}
-   🏁 *KM Final:* ${kmFinal || 'Pendente'}
-   🛣️ *KM Rodado:* ${kmRodado}
+        const plates = Array.from(new Set([...(data.platesUsed || [])]));
+        const platesStr = plates.length > 0 ? plates.join(' / ') : 'N/A';
 
- ☑️ *Recolhidas e Remanejadas*
-${formatList(data.remanejadas)}
+        const formatTime = (dateStr: string | null) => {
+          if (!dateStr) return '--:--';
+          const d = new Date(dateStr);
+          return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+        };
 
- ☑️  *Remanejadas da filial*
-${formatList(data.recolhidas)}
+        const report = `📋 *RELATÓRIO DIÁRIO DE JORNADA*
+📅 *Data:* ${today}
+👤 *Motorista:* ${driverName}
+🚗 *Veículo (Placa):* ${platesStr}
+🛣️ *KM Total Rodado:* ${totalKm.toFixed(1)} km
+⏰ *Horário:* ${formatTime(data.startTime)} às ${formatTime(data.endTime)}
 
- ☑️ *Estações* 
-${formatMultilineList(data.estacoes)}
+---
+📊 *RESUMO DE ATIVIDADES*
+🔋 *Bikes Recolhidas (Bateria Baixa):* ${data.counts?.bateriaBaixa || 0}
+🚲 *Manutenção Bicicleta:* ${data.counts?.manutencaoBicicleta || 0}
+🔒 *Manutenção Locker:* ${data.counts?.manutencaoLocker || 0}
+🚉 *Bikes Remanejadas (Estação):* ${data.remanejadas?.length || 0}
+⚠️ *Ocorrências Atendidas:* ${data.ocorrencias?.length || 0}
+🔍 *Bikes Não Encontradas:* ${data.naoEncontrada?.length || 0}
+❌ *Bikes Vandalizadas:* ${data.vandalizadas?.length || 0}
 
- ☑️ *Ocorrência* 
-${formatMultilineList(data.ocorrencias)}
+---
+📝 *DETALHAMENTO*
+✅ *Recolhidas (Filial):* ${formatList(data.recolhidas)}
+✅ *Remanejadas (Estação):* ${formatList(data.remanejadas)}
+📍 *Estações Abastecidas:*
+${Object.entries(data.estacoes || {}).map(([name, count]) => `• ${name}: ${count} bike(s)`).join('\n') || 'Nenhuma'}
 
- ☑️ *Não encontrada* 
-${formatList(data.naoEncontrada)}
+⚠️ *Ocorrências:* ${formatMultilineList(data.ocorrencias)}
+❌ *Vandalizadas:* ${formatList(data.vandalizadas)}
 
- ☑️ *Vandalizadas*
-${formatList(data.vandalizadas)}
-
- ☑️ *Revisão*     
-${formatList(data.revisao)}
-
- ☑️ *Locker* 
-0
-
- ☑️  *OBS*
+---
+💬 *OBSERVAÇÕES:*
 `;
         setReportText(report.trim());
       } else {
@@ -79,7 +95,7 @@ ${formatList(data.revisao)}
       fetchAndGenerateReport();
       setCopyButtonText('Copiar');
     }
-  }, [isOpen, driverName, kmFinal]);
+  }, [isOpen, driverName, kmFinal, kmInicial]);
 
   if (!isOpen) return null;
 
@@ -91,16 +107,35 @@ ${formatList(data.revisao)}
 
     setIsSubmitting(true);
     try {
-      // Atualiza o KM Final no servidor antes de permitir a cópia
-      // O logReport no backend agora aceita kmFinal
-      // No entanto, o logReport é chamado para cada ação. 
-      // Aqui precisamos de uma ação específica para finalizar o turno ou apenas atualizar o KM.
-      // Vou usar uma ação genérica ou reaproveitar logReport com dados vazios se necessário.
-      // Na verdade, o logReport é para cada bike.
-      // Vamos criar uma ação 'updateKmFinal' ou similar.
-      // Mas o usuário disse: "será necessário digitar o KM final no campo de Gerar relatorio, para poder liberar o botão de copiar."
-      
-      // Vamos apenas enviar o KM final para o servidor.
+      // 1. Calcula KM total final
+      let totalKm = reportData?.totalKmRodado || 0;
+      const kmFinalNum = parseFloat(kmFinal) || 0;
+      if (kmFinalNum > 0 && kmInicial !== undefined) {
+        const currentDiff = kmFinalNum - kmInicial;
+        if (currentDiff > 0) totalKm += currentDiff;
+      }
+
+      // 2. Salva o resumo diário na nova aba
+      await apiCall({
+        action: 'saveDailySummary',
+        summaryData: {
+          driverName,
+          plates: reportData?.platesUsed?.join(' / ') || 'N/A',
+          totalKm,
+          bateriaCount: reportData?.counts?.bateriaBaixa || 0,
+          manutBikeCount: reportData?.counts?.manutencaoBicicleta || 0,
+          manutLockerCount: reportData?.counts?.manutencaoLocker || 0,
+          remanejadasCount: reportData?.remanejadas?.length || 0,
+          ocorrenciasCount: reportData?.ocorrencias?.length || 0,
+          naoEncontradasCount: reportData?.naoEncontrada?.length || 0,
+          vandalizadasCount: reportData?.vandalizadas?.length || 0,
+          startTime: reportData?.startTime,
+          endTime: new Date().toISOString(), // O fim é agora
+          obs: '' // Pode ser expandido se houver campo de obs
+        }
+      });
+
+      // 3. Registra o FIM_TURNO no servidor (log individual)
       const result = await apiCall({ 
         action: 'logReport', 
         rowData: [new Date().toISOString(), 'SISTEMA', 'FIM_TURNO', `KM Final: ${kmFinal}`, driverName],
@@ -110,7 +145,14 @@ ${formatList(data.revisao)}
       if (result.success) {
         navigator.clipboard.writeText(reportText);
         setCopyButtonText('Copiado!');
-        setTimeout(() => setCopyButtonText('Copiar'), 2000);
+        
+        // Após copiar, se o motorista quiser trocar de carro, ele precisará informar nova placa/KM.
+        // Vamos emitir um evento ou chamar uma função para resetar o estado do veículo no MainScreen.
+        setTimeout(() => {
+          setCopyButtonText('Copiar');
+          alert("Relatório copiado e KM Final registrado. Se for trocar de veículo, utilize a opção 'Trocar Veículo' no menu.");
+          onClose();
+        }, 1000);
       } else {
         alert("Erro ao salvar KM Final: " + result.error);
       }
