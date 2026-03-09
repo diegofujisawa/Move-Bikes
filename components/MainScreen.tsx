@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { BicycleData, PickupRequest, DriverLocation } from '../types';
-import { LogoutIcon, PlusIcon, PlusPlusIcon, MapIcon, SheetIcon, SearchIcon, AlertIcon, CalendarIcon, CarIcon, XIcon, BicycleIcon, MovingIcon, UserIcon, AlertTriangleIcon, RefreshIcon, QrCodeIcon } from './icons';
+import { LogoutIcon, PlusIcon, PlusPlusIcon, MapIcon, SheetIcon, SearchIcon, AlertIcon, CalendarIcon, CarIcon, XIcon, BicycleIcon, MovingIcon, UserIcon, AlertTriangleIcon, RefreshIcon, QrCodeIcon, TrailerIcon } from './icons';
 import { Html5Qrcode } from 'html5-qrcode';
 import ScheduleModal from './ScheduleModal';
 import ReporModal from './ReporModal';
@@ -66,6 +66,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     
     const [isRequestModalOpen, setRequestModalOpen] = useState(false);
     const [isRouteModalOpen, setRouteModalOpen] = useState(false);
+    const [isTrailerModalOpen, setTrailerModalOpen] = useState(false);
     const [isReportModalOpen, setReportModalOpen] = useState(false);
     const [isVehicleModalOpen, setIsVehicleModalOpen] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
@@ -76,6 +77,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const [routeBikesDetails, setRouteBikesDetails] = useState<Record<string, any>>({});
     const [currentDriverLocation, setCurrentDriverLocation] = useState<{lat: number, lng: number} | null>(null);
     const [collectedBikes, setCollectedBikes] = useState<string[]>([]);
+    const [collectedBikesDetails, setCollectedBikesDetails] = useState<Record<string, any>>({});
     const [stations, setStations] = useState<any[]>([]);
     const [bikeConflicts, setBikeConflicts] = useState<Record<string, any>>({});
     const [driverLocations, setDriverLocations] = useState<DriverLocation[]>([]);
@@ -468,12 +470,12 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         };
     }, []);
 
-    const handleAcceptRequest = async (requestId: number, bikeNumbers: string) => {
+    const handleAcceptRequest = async (requestId: number, bikeNumbers: string, reason: string = '') => {
         const originalPendingRequests = [...pendingRequests];
         const originalRouteBikes = [...routeBikes];
+        const originalCollectedBikes = [...collectedBikes];
         
-        // ATUALIZAÇÃO OTIMISTA: Remove da lista e adiciona ao roteiro imediatamente
-        const bikesToAdd = bikeNumbers.split(',').map(s => s.trim()).filter(Boolean);
+        const bikesToAdd = (bikeNumbers || '').split(',').map(s => s.trim()).filter(Boolean);
         
         // Verifica se alguma bike já está no roteiro ou em posse
         const alreadyInPossession = bikesToAdd.filter(b => collectedBikes.includes(b));
@@ -483,17 +485,28 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             return;
         }
 
+        const isTrailer = (reason || '').startsWith('[CARRETINHA]');
+
         setPendingRequests(prev => prev.filter(r => r.id !== requestId));
-        const newRouteBikes = [...new Set([...routeBikes, ...bikesToAdd])];
-        setRouteBikes(newRouteBikes);
+        
+        let newRouteBikes = [...routeBikes];
+        let newCollectedBikes = [...collectedBikes];
+
+        if (isTrailer) {
+            newCollectedBikes = [...new Set([...collectedBikes, ...bikesToAdd])];
+            setCollectedBikes(newCollectedBikes);
+        } else {
+            newRouteBikes = [...new Set([...routeBikes, ...bikesToAdd])];
+            setRouteBikes(newRouteBikes);
+        }
 
         setIsLoading(true);
         try {
             const result = await apiCall({ action: 'acceptRequest', requestId, driverName });
             if (result.success) {
                 // Atualiza o estado do roteiro no servidor
-                await apiCall({ action: 'updateDriverState', driverName, routeBikes: newRouteBikes, collectedBikes });
-                alert('Solicitação aceita e adicionada ao seu roteiro!');
+                await apiCall({ action: 'updateDriverState', driverName, routeBikes: newRouteBikes, collectedBikes: newCollectedBikes });
+                alert(isTrailer ? 'Carretinha aceita e adicionada às suas bikes recolhidas!' : 'Solicitação aceita e adicionada ao seu roteiro!');
             } else {
                 throw new Error(result.error || 'Falha ao aceitar a solicitação.');
             }
@@ -501,6 +514,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             // ROLLBACK em caso de erro
             setPendingRequests(originalPendingRequests);
             setRouteBikes(originalRouteBikes);
+            setCollectedBikes(originalCollectedBikes);
             setError(err.message);
         } finally {
             setIsLoading(false);
@@ -557,15 +571,20 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     };
     
     const handleCreateRoute = async (details: { routeName: string; bikeNumbers: string[]; recipient: string; }) => {
+        if (!details.bikeNumbers || details.bikeNumbers.length === 0) {
+            alert('Por favor, insira ao menos um número de bicicleta.');
+            return;
+        }
+
         setIsLoading(true);
         setError(null);
         try {
             const result = await apiCall({
                 action: 'createRequest',
                 patrimonio: details.bikeNumbers.join(', '),
-                ocorrencia: details.routeName,
+                ocorrencia: details.routeName || 'Roteiro sem nome',
                 local: 'Criado via Roteiro App',
-                recipient: details.recipient
+                recipient: details.recipient || 'Todos'
             });
 
             if (result.success) {
@@ -577,6 +596,39 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             }
         } catch (err: any) {
             setError(err.message);
+            alert(`Erro ao enviar roteiro: ${err.message}`);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleCreateTrailer = async (details: { routeName: string; bikeNumbers: string[]; recipient: string; }) => {
+        if (!details.bikeNumbers || details.bikeNumbers.length === 0) {
+            alert('Por favor, insira ao menos um número de bicicleta.');
+            return;
+        }
+        
+        setIsLoading(true);
+        setError(null);
+        try {
+            const result = await apiCall({
+                action: 'createRequest',
+                patrimonio: details.bikeNumbers.join(', '),
+                ocorrencia: `[CARRETINHA] ${details.routeName || 'Sem Nome'}`,
+                local: 'Criado via Carretinha App',
+                recipient: details.recipient || 'Todos'
+            });
+
+            if (result.success) {
+                alert('Carretinha enviada como solicitação com sucesso!');
+                setTrailerModalOpen(false);
+                fetchRequests(); 
+            } else {
+                throw new Error(result.error || 'Falha ao criar a solicitação de carretinha.');
+            }
+        } catch (err: any) {
+            setError(err.message);
+            alert(`Erro ao enviar carretinha: ${err.message}`);
         } finally {
             setIsLoading(false);
         }
@@ -720,12 +772,12 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     }, [driversSummary]);
 
     const formatBattery = (value: any) => {
+        if (value === undefined || value === null || value === '') return '';
         const num = parseFloat(String(value).replace('%', '').replace(',', '.'));
         if (isNaN(num)) return value;
         // Se o valor for <= 1, assumimos que é decimal (ex: 0.95 -> 95%, 1 -> 100%)
         // Se for > 1, assumimos que já é o percentual inteiro (ex: 95 -> 95%)
-        const finalVal = num <= 1 ? Math.round(num * 100) : Math.round(num);
-        return `${finalVal}%`;
+        return num <= 1 ? Math.round(num * 100) : Math.round(num);
     };
 
     const formatCoordinate = (coord: any): string => {
@@ -1065,6 +1117,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         return R * c; // Distância em metros
     };
 
+
+
     
 
     const fetchDriverState = async () => {
@@ -1110,11 +1164,30 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         }
     };
 
+    const fetchCollectedDetails = async () => {
+        if (collectedBikes.length === 0 || document.visibilityState === 'hidden') {
+            if (collectedBikes.length === 0) setCollectedBikesDetails({});
+            return;
+        }
+        try {
+            const result = await apiCall({ action: 'getRouteDetails', driverName, bikeNumbers: collectedBikes });
+            if (result.success && result.data) {
+                setCollectedBikesDetails(result.data);
+            }
+        } catch (err: any) {
+            console.error('Erro ao buscar detalhes das bikes recolhidas:', err.message);
+        }
+    };
+
     useEffect(() => {
         fetchRouteDetails();
-        const interval = setInterval(fetchRouteDetails, 10000);
+        fetchCollectedDetails();
+        const interval = setInterval(() => {
+            fetchRouteDetails();
+            fetchCollectedDetails();
+        }, 15000);
         return () => clearInterval(interval);
-    }, [routeBikes, driverName]);
+    }, [routeBikes, collectedBikes, driverName]);
 
     const sortedRouteBikes = useMemo(() => {
         if (!currentDriverLocation || routeBikes.length === 0) return routeBikes;
@@ -1398,6 +1471,9 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                     <button onClick={() => setRouteModalOpen(true)} disabled={isLoading} title="Criar Roteiro" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
                         <PlusPlusIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                     </button>
+                    <button onClick={() => setTrailerModalOpen(true)} disabled={isLoading} title="Carretinha" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
+                        <TrailerIcon className="w-6 h-6 sm:w-7 sm:h-7" />
+                    </button>
                     <button 
                         onClick={() => {
                             setIsAdminAlertsOpen(true);
@@ -1566,7 +1642,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                             </div>
                             <div>
                                 <p className="font-semibold text-gray-500 text-xs uppercase">Bateria</p>
-                                <p className="text-gray-800 font-medium">{formatBattery(searchedBike['Bateria'])}</p>
+                                <p className="text-gray-800 font-medium">{formatBattery(searchedBike['Bateria'])}%</p>
                             </div>
                             <div>
                                 <p className="font-semibold text-gray-500 text-xs uppercase">Localidade</p>
@@ -1632,7 +1708,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                         {renderLocationWithMap(req.location)}
                                     </div>
                                     <div className="flex flex-col gap-4 items-end pt-1">
-                                        <button onClick={() => handleAcceptRequest(req.id, req.bikeNumber)} disabled={isLoading} className="text-green-600 hover:text-green-700 text-sm font-bold disabled:text-gray-400 transition-colors">Aceitar</button>
+                                        <button onClick={() => handleAcceptRequest(req.id, req.bikeNumber, req.reason)} disabled={isLoading} className="text-green-600 hover:text-green-700 text-sm font-bold disabled:text-gray-400 transition-colors">Aceitar</button>
                                         <button onClick={() => handleDeclineRequest(req.id)} disabled={isLoading} className="text-red-600 hover:text-red-700 text-sm font-bold disabled:text-gray-400 transition-colors">Recusar</button>
                                     </div>
                                 </li>
@@ -2007,6 +2083,11 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                                 <div className="flex flex-col">
                                                     <div className="flex items-center gap-2">
                                                         <p className="font-mono text-gray-800 font-bold text-lg">{bike}</p>
+                                                        {details?.battery !== undefined && (
+                                                            <div className="flex items-center justify-center w-8 h-8 rounded-full border-2 border-blue-500 text-[9px] font-bold text-blue-600 bg-white shadow-sm" title="Bateria">
+                                                                {formatBattery(details.battery)}%
+                                                            </div>
+                                                        )}
                                                         {renderConflictIcon(bike)}
                                                         {isMoving && (
                                                             <div className="flex items-center gap-0.5 text-orange-500 animate-pulse" title={`Bike moveu ${movedDistanceMeters.toFixed(0)}m`}>
@@ -2066,7 +2147,14 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                             <ul className="space-y-2">
                                 {collectedBikes.map(bike => (
                                     <li key={bike} className="p-3 bg-white border rounded-md flex flex-col sm:flex-row justify-between items-center">
-                                        <p className="font-mono text-gray-800 font-bold text-lg mb-2 sm:mb-0">{bike}</p>
+                                        <div className="flex items-center gap-3 mb-2 sm:mb-0">
+                                            <p className="font-mono text-gray-800 font-bold text-lg">{bike}</p>
+                                            {collectedBikesDetails[bike]?.battery !== undefined && (
+                                                <div className="flex items-center justify-center w-10 h-10 rounded-full border-2 border-blue-500 text-[10px] font-bold text-blue-600 bg-white shadow-sm" title="Bateria">
+                                                    {formatBattery(collectedBikesDetails[bike].battery)}%
+                                                </div>
+                                            )}
+                                        </div>
                                         <div className="grid grid-cols-3 gap-2 w-full max-w-[240px]">
                                             <button onClick={() => handleCollectedBikeAction(bike, 'Enviada para Estação')} disabled={isLoading} className="px-2 py-1 bg-blue-500 text-white rounded-md hover:bg-blue-600 active:scale-95 transition-all text-xs disabled:bg-gray-400">Estação</button>
                                             <button onClick={() => handleCollectedBikeAction(bike, 'Enviada para Filial')} disabled={isLoading} className="px-2 py-1 bg-green-500 text-white rounded-md hover:bg-green-600 active:scale-95 transition-all text-xs disabled:bg-gray-400">Filial</button>
@@ -2102,6 +2190,19 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 motoristas={motoristas}
                 error={error}
                 clearError={() => setError(null)}
+                type="route"
+            />
+
+            <RouteModal
+                isOpen={isTrailerModalOpen}
+                onClose={() => setTrailerModalOpen(false)}
+                onSubmit={handleCreateTrailer}
+                isLoading={isLoading}
+                pendingBikeNumbers={allActiveBikes}
+                motoristas={motoristas}
+                error={error}
+                clearError={() => setError(null)}
+                type="trailer"
             />
             
             <ReportModal 

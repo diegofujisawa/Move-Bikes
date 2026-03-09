@@ -147,3 +147,20 @@ export const QrCodeIcon: React.FC<IconProps> = ({ className = "w-6 h-6" }) => (
   </svg>
 );
 
+export const TrailerIcon: React.FC<IconProps> = ({ className = "w-6 h-6" }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+    {/* Car/Towing Vehicle */}
+    <path d="M14 16h4l2-2v-3h-3l-1-2h-5v7h3" />
+    <circle cx="15.5" cy="16.5" r="1.5" />
+    <circle cx="19.5" cy="16.5" r="1.5" />
+    
+    {/* Hitch */}
+    <path d="M14 15h-2" />
+    
+    {/* Trailer */}
+    <path d="M2 9h10v7H2z" />
+    <circle cx="4.5" cy="16.5" r="1.5" />
+    <circle cx="9.5" cy="16.5" r="1.5" />
+  </svg>
+);
+

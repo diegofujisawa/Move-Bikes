@@ -1844,6 +1844,7 @@ function getRouteDetails(driverName, bikeNumbers) {
         bikeNumber: patrimonio,
         currentLat: parseCoordinate(row[COLUMN_INDICES.BIKES.LATITUDE - 1]),
         currentLng: parseCoordinate(row[COLUMN_INDICES.BIKES.LONGITUDE - 1]),
+        battery: row[COLUMN_INDICES.BIKES.BATERIA - 1],
         initialLat: null,
         initialLng: null
       };

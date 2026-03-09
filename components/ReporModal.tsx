@@ -40,34 +40,37 @@ const ReporModal: React.FC<ReporModalProps> = ({ isOpen, onClose, data, isLoadin
         if (!stationKey) stationKey = keys[1] || keys[0];
         if (!qtyKey) qtyKey = keys[2] || keys[1];
 
-        // Lista de estações permitidas (26 fornecidas pelo usuário)
+        // Lista de estações permitidas (29 fornecidas pelo usuário)
         const allowedStations = [
+            "Serttel Filial SJC",
             "Open Mall",
+            "Pç. Padre João (Igreja Matriz)",
+            "LV - Dutra",
+            "Pç. Ulisses Guimarães",
             "Pq. Ribeirão Vermelho - B",
             "Villa Real – Urbanova",
-            "Pq Tecnológico",
+            "Torii",
             "Centro da Juventude",
-            "LV - Maurício Cury",
-            "LV - Vl. Sanchez",
-            "Arco Inovação",
-            "Serttel Filial SJC",
-            "Parque da Cidade",
-            "Mirante Anchieta",
-            "Praça Conego Lima",
-            "LV - Osvaldo Cruz",
-            "LV - Jd. Oriente",
-            "Banco do Povo",
-            "Pç. Padre João (Igreja Matriz)",
             "Pç. Afonso Pena",
+            "Praça Conego Lima",
+            "Pq Tecnológico",
+            "Arco Inovação",
+            "LV - Jd. América",
+            "LV - Maurício Cury",
             "Pç. Kennedy",
+            "LV - Osvaldo Cruz",
+            "LV - Vl. Sanchez",
+            "Mirante Anchieta",
             "Pç. Floripes Bicudo",
             "Pq. Vicentina Aranha",
             "Pq. Santos Dumont",
-            "LV - Dutra",
+            "Banco do Povo",
             "Cassiopéia",
-            "LV - Jd. América",
-            "Torii",
-            "Pç. Ulisses Guimarães"
+            "LV - Jd. Oriente",
+            "LV - Morumbi",
+            "LV - Vale do Sol",
+            "LV - Eldorado",
+            "LV - Sul"
         ].map(s => s.toLowerCase().trim());
 
         // Filter: Only non-empty names, exclude header-like rows, and MUST be in the allowed list
@@ -75,15 +78,33 @@ const ReporModal: React.FC<ReporModalProps> = ({ isOpen, onClose, data, isLoadin
             const stationVal = String(row[stationKey] || '').trim();
             if (!stationVal) return false;
 
-            const lowerVal = stationVal.toLowerCase();
+            // Normalize: replace non-breaking spaces (\u00A0) and multiple spaces with a single space
+            const normalizedVal = stationVal.replace(/[\u00A0\s]+/g, ' ').toLowerCase().trim();
             
             // Excluir cabeçalhos
-            if (lowerVal.includes('estação') || lowerVal.includes('estacao') || lowerVal.includes('número') || lowerVal.includes('numero')) {
+            if (normalizedVal.includes('estação') || normalizedVal.includes('estacao') || normalizedVal.includes('número') || normalizedVal.includes('numero')) {
                 return false;
             }
 
-            // Filtrar apenas as 26 estações permitidas
-            return allowedStations.includes(lowerVal);
+            // Filtrar apenas as 29 estações permitidas
+            // Usamos some para permitir correspondência flexível
+            return allowedStations.some(allowed => {
+                const normalizedAllowed = allowed.replace(/[\u00A0\s]+/g, ' ').toLowerCase().trim();
+                
+                // Correspondência exata após normalização
+                if (normalizedVal === normalizedAllowed) return true;
+                
+                // Se o valor da planilha contém o nome permitido (ex: "29 Banco do Povo" contém "Banco do Povo")
+                if (normalizedVal.includes(normalizedAllowed)) return true;
+
+                // Lidar com variações de "Praça" vs "Pç."
+                const withPc = normalizedAllowed.replace('praça', 'pç.');
+                const withPraca = normalizedAllowed.replace('pç.', 'praça');
+                
+                if (normalizedVal.includes(withPc) || normalizedVal.includes(withPraca)) return true;
+
+                return false;
+            });
         });
 
         // Map to simplified objects and sort by quantity ascending
