@@ -485,7 +485,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             return;
         }
 
-        const isTrailer = (reason || '').startsWith('[CARRETINHA]');
+        const isTrailer = (reason || '').toUpperCase().includes('CARRETINHA');
 
         setPendingRequests(prev => prev.filter(r => r.id !== requestId));
         
@@ -493,8 +493,11 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         let newCollectedBikes = [...collectedBikes];
 
         if (isTrailer) {
+            // Se for carretinha, adiciona diretamente às bikes recolhidas e garante que não estejam no roteiro
             newCollectedBikes = [...new Set([...collectedBikes, ...bikesToAdd])];
+            newRouteBikes = routeBikes.filter(b => !bikesToAdd.includes(b));
             setCollectedBikes(newCollectedBikes);
+            setRouteBikes(newRouteBikes);
         } else {
             newRouteBikes = [...new Set([...routeBikes, ...bikesToAdd])];
             setRouteBikes(newRouteBikes);
