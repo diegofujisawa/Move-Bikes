@@ -249,7 +249,8 @@ function getVehiclePlates() {
 
 function handleLogin(login, password, plate, kmInicial) {
   const lock = LockService.getScriptLock();
-  lock.waitLock(15000);
+  // Aumentado para 20 segundos para dar mais chance em momentos de pico
+  lock.waitLock(20000);
   try {
     const sheet = ss.getSheetByName(ACCESS_SHEET_NAME);
     if (!sheet) throw new Error(`Planilha "${ACCESS_SHEET_NAME}" não encontrada.`);
@@ -257,26 +258,18 @@ function handleLogin(login, password, plate, kmInicial) {
     const lastRow = sheet.getLastRow();
     if (lastRow < 2) return { success: false, error: 'Nenhum usuário cadastrado.' };
 
-    const dataRange = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn());
-    const values = dataRange.getDisplayValues();
-
-    const loginTrimmedLower = login.trim().toLowerCase();
-    let foundRowIndex = -1;
-
-    for (let i = 0; i < values.length; i++) {
-      const rowLogin = (values[i][COLUMN_INDICES.ACCESS.LOGIN - 1] || '').trim().toLowerCase();
-      if (rowLogin === loginTrimmedLower) {
-        foundRowIndex = i;
-        break;
-      }
-    }
+    // OTIMIZAÇÃO: Usa TextFinder para encontrar o login de forma eficiente
+    const loginCol = COLUMN_INDICES.ACCESS.LOGIN;
+    const range = sheet.getRange(2, loginCol, lastRow - 1, 1);
+    const textFinder = range.createTextFinder(String(login).trim()).matchEntireCell(true);
+    const foundCell = textFinder.findNext();
     
-    if (foundRowIndex === -1) {
+    if (!foundCell) {
       return { success: false, error: `Login "${login}" não encontrado.` };
     }
 
-    const rowIndexInSheet = foundRowIndex + 2; 
-    const rowData = values[foundRowIndex];
+    const rowIndexInSheet = foundCell.getRow();
+    const rowData = sheet.getRange(rowIndexInSheet, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
     const category = (rowData[COLUMN_INDICES.ACCESS.CATEGORIA - 1] || 'MOTORISTA').trim().toUpperCase();
     const storedPassword = (rowData[COLUMN_INDICES.ACCESS.SENHA - 1] || '').toString().trim();
 
@@ -288,37 +281,22 @@ function handleLogin(login, password, plate, kmInicial) {
         }
 
         // Validação estrita de KM Inicial contra o último KM Final registrado.
-        // O motorista deve digitar exatamente o KM final do turno anterior.
         const expectedKm = getVehicleKmFinal(plate);
         if (expectedKm !== null && expectedKm !== undefined && expectedKm !== "" && parseFloat(kmInicial) !== parseFloat(expectedKm)) {
-          // Se o KM esperado for 0 e o usuário digitar 0, está ok.
-          // Mas se o KM esperado for > 0 e o usuário digitar algo diferente, bloqueia.
           if (!(parseFloat(expectedKm) === 0 && parseFloat(kmInicial) === 0)) {
             return { success: false, error: 'KM Inicial incorreto. Verifique o odômetro do veículo.' };
           }
         }
-        
-        const isFixedPlate = ['SYS4J63', 'TEG7C35', 'TEMA047'].includes(plate.toUpperCase());
-        
-        // Atualiza a placa do usuário na planilha de Acesso APENAS se não for uma placa fixa
-        // Isso evita duplicar a placa na coluna H (Placa)
-        if (!isFixedPlate) {
-          sheet.getRange(rowIndexInSheet, COLUMN_INDICES.ACCESS.PLACA).setValue(plate);
-        } else {
-          // Se for placa fixa, garantimos que a linha do motorista não tenha placa para não duplicar
-          sheet.getRange(rowIndexInSheet, COLUMN_INDICES.ACCESS.PLACA).setValue('');
-        }
-        
+
         // Atualiza o KM na linha do VEÍCULO (independente do motorista)
         updateVehicleKm(plate, kmInicial, undefined);
 
-        // Registra INICIO_TURNO na aba de Relatórios para histórico e soma de KM
+        // Registra INICIO_TURNO na aba de Relatórios
         const reportSheet = ss.getSheetByName(REPORT_SHEET_NAME);
         if (reportSheet) {
           const now = new Date();
           const timestamp = formatDateTime(now);
           const userName = rowData[COLUMN_INDICES.ACCESS.USUARIO - 1];
-          // Colunas: Timestamp, Patrimonio(Placa), Status(INICIO_TURNO), Observacao(KM), Motorista
           reportSheet.appendRow([timestamp, plate, 'INICIO_TURNO', kmInicial, userName]);
         }
       }
@@ -353,21 +331,14 @@ function handleLogout(userName) {
     const lastRow = sheet.getLastRow();
     if (lastRow < 2) return { success: true };
 
-    const dataRange = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn());
-    const values = dataRange.getDisplayValues();
-    const userTrimmedLower = userName.trim().toLowerCase();
-    let foundRowIndex = -1;
+    // OTIMIZAÇÃO: Usa TextFinder para encontrar o usuário de forma eficiente
+    const userCol = COLUMN_INDICES.ACCESS.USUARIO;
+    const range = sheet.getRange(2, userCol, lastRow - 1, 1);
+    const textFinder = range.createTextFinder(String(userName).trim()).matchEntireCell(true);
+    const foundCell = textFinder.findNext();
 
-    for (let i = 0; i < values.length; i++) {
-      const rowUser = (values[i][COLUMN_INDICES.ACCESS.USUARIO - 1] || '').trim().toLowerCase();
-      if (rowUser === userTrimmedLower) {
-        foundRowIndex = i;
-        break;
-      }
-    }
-
-    if (foundRowIndex !== -1) {
-      const rowIndexInSheet = foundRowIndex + 2;
+    if (foundCell) {
+      const rowIndexInSheet = foundCell.getRow();
       sheet.getRange(rowIndexInSheet, COLUMN_INDICES.ACCESS.STATUS_ONLINE).setValue('DESLOGADO');
       sheet.getRange(rowIndexInSheet, COLUMN_INDICES.ACCESS.GPS).setValue('');
     }
@@ -413,7 +384,11 @@ function updateLocation(driverName, latitude, longitude) {
     return { success: false, error: 'Dados de localização incompletos.' };
   }
   const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+  // Tenta obter o lock por apenas 2 segundos. Se não conseguir, pula esta atualização de GPS
+  // para não travar o sistema, já que atualizações de GPS são frequentes e não críticas.
+  if (!lock.tryLock(2000)) {
+    return { success: true, note: 'Lock timeout, skipped update' };
+  }
   try {
     const sheet = ss.getSheetByName(ACCESS_SHEET_NAME);
     if (!sheet) return { success: false, error: 'Planilha de acesso não encontrada.' };
@@ -421,22 +396,14 @@ function updateLocation(driverName, latitude, longitude) {
     const lastRow = sheet.getLastRow();
     if (lastRow < 2) return { success: false, error: 'Nenhum motorista cadastrado.' };
 
-    const dataRange = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn());
-    const values = dataRange.getDisplayValues();
-    const driverTrimmedLower = driverName.trim().toLowerCase();
-    let foundRowIndex = -1;
+    // OTIMIZAÇÃO: Usa TextFinder para encontrar o motorista de forma eficiente
+    const userCol = COLUMN_INDICES.ACCESS.USUARIO;
+    const range = sheet.getRange(2, userCol, lastRow - 1, 1);
+    const textFinder = range.createTextFinder(String(driverName).trim()).matchEntireCell(true);
+    const foundCell = textFinder.findNext();
 
-    for (let i = 0; i < values.length; i++) {
-        const rowUser = (values[i][COLUMN_INDICES.ACCESS.USUARIO - 1] || '').trim().toLowerCase();
-        if(rowUser === driverTrimmedLower) {
-            foundRowIndex = i;
-            break;
-        }
-    }
-
-    if (foundRowIndex !== -1) {
-      const rowIndexInSheet = foundRowIndex + 2;
-      // ATUALIZAÇÃO: Garante que as coordenadas sejam salvas com ponto e separadas por ponto e vírgula
+    if (foundCell) {
+      const rowIndexInSheet = foundCell.getRow();
       const latFixed = parseCoordinate(latitude);
       const lngFixed = parseCoordinate(longitude);
       const locationString = `${latFixed};${lngFixed}|${new Date().getTime()}`;
@@ -937,11 +904,14 @@ function logReport(rowData, kmFinal, plate) {
         const accessSheet = ss.getSheetByName(ACCESS_SHEET_NAME);
         if (accessSheet) {
           const lastRowAccess = accessSheet.getLastRow();
-          const accessData = accessSheet.getRange(2, 1, lastRowAccess - 1, 1).getValues();
-          for (let i = 0; i < accessData.length; i++) {
-            if (accessData[i][0].toString().trim().toLowerCase() === motorista.toLowerCase()) {
-              plateToUpdate = accessSheet.getRange(i + 2, COLUMN_INDICES.ACCESS.PLACA).getValue();
-              break;
+          if (lastRowAccess >= 2) {
+            // OTIMIZAÇÃO: Usa TextFinder para encontrar o motorista de forma eficiente
+            const userCol = COLUMN_INDICES.ACCESS.USUARIO;
+            const range = accessSheet.getRange(2, userCol, lastRowAccess - 1, 1);
+            const textFinder = range.createTextFinder(String(motorista).trim()).matchEntireCell(true);
+            const foundCell = textFinder.findNext();
+            if (foundCell) {
+              plateToUpdate = accessSheet.getRange(foundCell.getRow(), COLUMN_INDICES.ACCESS.PLACA).getValue();
             }
           }
         }
@@ -2205,16 +2175,6 @@ function switchVehicle(driverName, plate, kmInicial) {
 
     // REMOVIDO: Validação estrita de KM Inicial contra o último KM Final registrado.
     // O motorista deve digitar o que vê no painel.
-    
-    const isFixedPlate = ['SYS4J63', 'TEG7C35', 'TEMA047'].includes(plate.toUpperCase());
-
-    // Atualiza a placa do usuário na planilha de Acesso APENAS se não for uma placa fixa
-    if (!isFixedPlate) {
-      sheet.getRange(rowIndexInSheet, COLUMN_INDICES.ACCESS.PLACA).setValue(plate);
-    } else {
-      // Se for placa fixa, garantimos que a linha do motorista não tenha placa para não duplicar
-      sheet.getRange(rowIndexInSheet, COLUMN_INDICES.ACCESS.PLACA).setValue('');
-    }
     
     // Atualiza o KM na linha do VEÍCULO (independente do motorista)
     updateVehicleKm(plate, kmInicial, undefined);

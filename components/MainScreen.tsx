@@ -11,6 +11,7 @@ import RouteModal from './RouteModal';
 import DestinationModal from './DestinationModal';
 import HistoryModal from './HistoryModal';
 import VehicleSwitchModal from './VehicleSwitchModal';
+import EditDriverModal from './EditDriverModal';
 import AdminAlerts from './AdminAlerts';
 import { apiCall, apiGetCall } from '../api';
 import { User } from '../types';
@@ -140,6 +141,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         stationName?: string;
     }>({ isOpen: false, bikeNumber: '', type: 'Estação' });
     const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+    const [isEditDriverModalOpen, setIsEditDriverModalOpen] = useState(false);
+    const [editingDriver, setEditingDriver] = useState<any>(null);
     const [requestsHistory, setRequestsHistory] = useState<any[]>([]);
     const [isHistoryLoading, setIsHistoryLoading] = useState(false);
     const [processingBikes, setProcessingBikes] = useState<Set<string>>(new Set());
@@ -222,6 +225,29 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             }
         } catch (err: any) {
             alert("Erro ao confirmar: " + err.message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleUpdateDriverState = async (targetDriverName: string, routeBikes: string[], collectedBikes: string[]) => {
+        setIsLoading(true);
+        try {
+            const result = await apiCall({
+                action: 'updateDriverState',
+                driverName: targetDriverName,
+                routeBikes,
+                collectedBikes
+            });
+            if (result.success) {
+                alert(`Estado do motorista ${targetDriverName} atualizado com sucesso!`);
+                refreshAll(true);
+                setIsEditDriverModalOpen(false);
+            } else {
+                throw new Error(result.error || 'Erro ao atualizar estado do motorista');
+            }
+        } catch (err: any) {
+            alert("Erro ao atualizar: " + err.message);
         } finally {
             setIsLoading(false);
         }
@@ -335,7 +361,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             }
         };
         fetchAlertCount();
-        const interval = setInterval(fetchAlertCount, 20000); // Reduzido para 20 segundos para alertas mais rápidos
+        const interval = setInterval(fetchAlertCount, 3000); // Reduzido para 3 segundos para alertas mais rápidos
         return () => clearInterval(interval);
     }, [driverName, lastViewedAlertCount]);
 
@@ -767,6 +793,19 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         return `${day}/${month}/${year} ${hours}:${minutes}:${seconds}`;
     };
 
+    const sortedCollectedBikes = useMemo(() => {
+        return [...collectedBikes].sort((a, b) => {
+            const numA = parseInt(a, 10) || 0;
+            const numB = parseInt(b, 10) || 0;
+            
+            if (numA !== numB) return numA - numB;
+            
+            const batA = collectedBikesDetails[a]?.battery ?? 0;
+            const batB = collectedBikesDetails[b]?.battery ?? 0;
+            return batB - batA;
+        });
+    }, [collectedBikes, collectedBikesDetails]);
+
     const allActiveBikes = useMemo(() => {
         const bikes = new Set<string>();
         driversSummary.forEach(d => {
@@ -1194,7 +1233,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         const interval = setInterval(() => {
             fetchRouteDetails();
             fetchCollectedDetails();
-        }, 15000);
+        }, 3000);
         return () => clearInterval(interval);
     }, [routeBikes, collectedBikes, driverName]);
 
@@ -1296,7 +1335,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         refreshAll();
         fetchStations(); // Estações mudam pouco, busca uma vez
 
-        const interval = setInterval(() => refreshAll(), 10000); // Reduzido para 10 segundos para tempo real
+        const interval = setInterval(() => refreshAll(), 3000); // Reduzido para 3 segundos para tempo real
 
         const handleVisibilityChange = () => {
             if (document.visibilityState === 'visible') {
@@ -1806,9 +1845,18 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                         <div className="grid grid-cols-1 gap-3">
                                             {driversSummary.map(driver => (
                                                 <div key={driver.name} className="bg-white p-3 rounded-lg border shadow-sm">
-                                                    <h3 className="font-black text-gray-900 text-sm uppercase mb-2 border-b pb-1">
-                                                        {driver.name}
-                                                    </h3>
+                                                    <div className="flex justify-between items-center mb-2 border-b pb-1">
+                                                        <h3 className="font-black text-gray-900 text-sm uppercase">
+                                                            {driver.name}
+                                                        </h3>
+                                                        <button 
+                                                            onClick={() => { setEditingDriver(driver); setIsEditDriverModalOpen(true); }}
+                                                            className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-full transition-colors"
+                                                            title="Editar bikes do motorista"
+                                                        >
+                                                            <SearchIcon className="w-4 h-4" />
+                                                        </button>
+                                                    </div>
                                                     <div className="grid grid-cols-5 gap-1.5 mb-3">
                                                         <div className="bg-blue-50 p-1.5 rounded border border-blue-100 text-center">
                                                             <p className="text-[8px] text-blue-600 font-black uppercase leading-tight">Notif.</p>
@@ -2152,9 +2200,9 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 {!category.includes('ADM') && (
                     <div className="mt-6 p-4 border rounded-lg bg-gray-50">
                         <h2 className="text-lg font-semibold text-gray-700 mb-3">Bikes Recolhidas</h2>
-                        {collectedBikes.length > 0 ? (
+                        {sortedCollectedBikes.length > 0 ? (
                             <ul className="space-y-2">
-                                {collectedBikes.map(bike => (
+                                {sortedCollectedBikes.map(bike => (
                                     <li key={bike} className="p-3 bg-white border rounded-md flex flex-col sm:flex-row justify-between items-center">
                                         <div className="flex items-center gap-3 mb-2 sm:mb-0">
                                             <p className="font-mono text-gray-800 font-bold text-lg">{bike}</p>
@@ -2188,6 +2236,14 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 driverLocations={driverLocations}
                 error={error}
                 clearError={() => setError(null)}
+            />
+
+            <EditDriverModal 
+                isOpen={isEditDriverModalOpen}
+                onClose={() => setIsEditDriverModalOpen(false)}
+                driver={editingDriver}
+                onSave={handleUpdateDriverState}
+                isLoading={isLoading}
             />
 
             <RouteModal

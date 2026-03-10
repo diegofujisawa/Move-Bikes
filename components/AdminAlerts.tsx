@@ -62,8 +62,8 @@ const AdminAlerts: React.FC<AdminAlertsProps> = ({ adminName, isOpen, onClose })
     useEffect(() => {
         if (isOpen) {
             fetchAlerts();
-            // Poll every 30 seconds while open
-            const interval = setInterval(fetchAlerts, 30000);
+            // Poll every 3 seconds while open
+            const interval = setInterval(fetchAlerts, 3000);
             return () => clearInterval(interval);
         }
     }, [isOpen, adminName]);
