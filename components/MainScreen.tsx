@@ -215,7 +215,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         try {
             const result = await apiCall({ action: 'confirmVandalizedFound', alertId, driverName });
             if (result.success) {
-                fetchVandalized();
+                refreshAll(true);
                 alert("Bicicleta vandalizada marcada como encontrada!");
             } else {
                 throw new Error(result.error);
@@ -510,6 +510,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 // Atualiza o estado do roteiro no servidor
                 await apiCall({ action: 'updateDriverState', driverName, routeBikes: newRouteBikes, collectedBikes: newCollectedBikes });
                 alert(isTrailer ? 'Carretinha aceita e adicionada às suas bikes recolhidas!' : 'Solicitação aceita e adicionada ao seu roteiro!');
+                refreshAll(true);
             } else {
                 throw new Error(result.error || 'Falha ao aceitar a solicitação.');
             }
@@ -535,6 +536,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             const result = await apiCall({ action: 'declineRequest', requestId, driverName });
             if (result.success) {
                 alert('Solicitação recusada.');
+                refreshAll(true);
             } else {
                 throw new Error(result.error || 'Falha ao recusar a solicitação.');
             }
@@ -562,7 +564,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             if (result.success) {
                 alert('Solicitação enviada com sucesso!');
                 setRequestModalOpen(false);
-                fetchRequests();
+                refreshAll(true);
             } else {
                 throw new Error(result.error || 'Falha ao criar a solicitação.');
             }
@@ -593,7 +595,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             if (result.success) {
                 alert('Roteiro enviado como solicitação com sucesso!');
                 setRouteModalOpen(false);
-                fetchRequests(); 
+                refreshAll(true);
             } else {
                 throw new Error(result.error || 'Falha ao criar a solicitação de roteiro.');
             }
@@ -625,7 +627,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             if (result.success) {
                 alert('Carretinha enviada como solicitação com sucesso!');
                 setTrailerModalOpen(false);
-                fetchRequests(); 
+                refreshAll(true);
             } else {
                 throw new Error(result.error || 'Falha ao criar a solicitação de carretinha.');
             }
@@ -889,6 +891,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 routeBikes: newRouteBikes.length > 0 ? newRouteBikes : [...routeBikes, bikeToRestore],
                 collectedBikes: collectedBikes
             });
+            refreshAll(true);
         } catch (err) {
             console.error("Erro ao restaurar bike do limbo:", err);
         } finally {
@@ -931,6 +934,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             if (!stateResult.success) {
                 throw new Error(stateResult.error || 'Falha ao sincronizar com o servidor.');
             }
+            refreshAll(true);
         } catch {
             // ROLLBACK: Se a chamada falhar, restaura o estado original
             setError(`Falha ao remover a bike ${bikeNumber} do roteiro. Restaurando.`);
@@ -1070,7 +1074,9 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 routeBikes, 
                 collectedBikes: newCollectedBikes 
             }).then(result => {
-                if (!result.success) {
+                if (result.success) {
+                    refreshAll(true);
+                } else {
                     setError(`Falha ao registrar "${status}" para a bike ${bikeNumber}.`);
                     setCollectedBikes(originalCollectedBikes);
                 }
@@ -1261,36 +1267,36 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         }
     };
 
-    useEffect(() => {
-        const refreshAll = async () => {
-            if (document.visibilityState === 'hidden' || isUpdatingStateRef.current) return;
-            
-            setIsSyncing(true);
-            try {
-                await Promise.all([
-                    fetchRequests(),
-                    fetchDriverState(),
-                    fetchBikeConflicts(),
-                    fetchSchedule(),
-                    fetchMotoristas(),
-                    fetchDriverLocations(),
-                    category.includes('ADM') ? fetchDriversSummary() : Promise.resolve(),
-                    category.includes('ADM') ? fetchAlerts() : Promise.resolve(),
-                    category.includes('ADM') ? fetchVandalized() : Promise.resolve(),
-                    category.includes('ADM') ? fetchChangeStatusData() : Promise.resolve()
-                ]);
-                setLastSyncTime(new Date().toLocaleTimeString());
-            } catch (err) {
-                console.error("Erro na atualização automática:", err);
-            } finally {
-                setIsSyncing(false);
-            }
-        };
+    const refreshAll = React.useCallback(async (force = false) => {
+        if (!force && (document.visibilityState === 'hidden' || isUpdatingStateRef.current)) return;
+        
+        setIsSyncing(true);
+        try {
+            await Promise.all([
+                fetchRequests(),
+                fetchDriverState(),
+                fetchBikeConflicts(),
+                fetchSchedule(),
+                fetchMotoristas(),
+                fetchDriverLocations(),
+                category.includes('ADM') ? fetchDriversSummary() : Promise.resolve(),
+                category.includes('ADM') ? fetchAlerts() : Promise.resolve(),
+                category.includes('ADM') ? fetchVandalized() : Promise.resolve(),
+                category.includes('ADM') ? fetchChangeStatusData() : Promise.resolve()
+            ]);
+            setLastSyncTime(new Date().toLocaleTimeString());
+        } catch (err) {
+            console.error("Erro na atualização automática:", err);
+        } finally {
+            setIsSyncing(false);
+        }
+    }, [driverName, category, summaryTimeRange, statusTimeRange]);
 
+    useEffect(() => {
         refreshAll();
         fetchStations(); // Estações mudam pouco, busca uma vez
 
-        const interval = setInterval(refreshAll, 10000); // Reduzido para 10 segundos para tempo real
+        const interval = setInterval(() => refreshAll(), 10000); // Reduzido para 10 segundos para tempo real
 
         const handleVisibilityChange = () => {
             if (document.visibilityState === 'visible') {
@@ -1304,7 +1310,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             clearInterval(interval);
             document.removeEventListener('visibilitychange', handleVisibilityChange);
         };
-    }, [driverName, category, summaryTimeRange, statusTimeRange]);
+    }, [refreshAll]);
 
     useEffect(() => {
         if (category.toUpperCase() !== 'MOTORISTA') {
