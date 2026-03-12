@@ -977,27 +977,43 @@ function logReport(rowData, kmFinal, plate) {
     const sheet = ss.getSheetByName(REPORT_SHEET_NAME);
     if (!sheet) throw new Error(`Planilha "${REPORT_SHEET_NAME}" não encontrada.`);
 
-    // Prevenção de duplicidade: verifica se já existe um registro idêntico nos últimos 10 segundos
+    // Prevenção de duplicidade robusta: verifica se já existe um registro idêntico nos últimos minutos
+    // O usuário solicitou que o app exclua a linha da segunda informação duplicada (mesmo local, mesma estação, diferença de minutos)
     const lastRow = sheet.getLastRow();
     if (lastRow > 1) {
-      const lastData = sheet.getRange(Math.max(2, lastRow - 5), 1, Math.min(lastRow - 1, 5), sheet.getLastColumn()).getValues();
+      // Verificamos as últimas 100 linhas para garantir que pegamos duplicatas mesmo com tráfego intenso
+      const numRowsToCheck = Math.min(lastRow - 1, 100);
+      const lastData = sheet.getRange(lastRow - numRowsToCheck + 1, 1, numRowsToCheck, sheet.getLastColumn()).getValues();
       const now = new Date();
-      const patrimonio = rowData[COLUMN_INDICES.REPORTS.PATRIMONIO - 1];
-      const status = rowData[COLUMN_INDICES.REPORTS.STATUS - 1];
-      const motorista = rowData[COLUMN_INDICES.REPORTS.MOTORISTA - 1];
+      
+      const patrimonio = (rowData[COLUMN_INDICES.REPORTS.PATRIMONIO - 1] || '').toString().trim();
+      const status = (rowData[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim();
+      const observacao = (rowData[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim();
+      const localidade = (rowData[COLUMN_INDICES.REPORTS.LOCALIDADE - 1] || '').toString().trim();
+      const motorista = (rowData[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
 
       for (let i = lastData.length - 1; i >= 0; i--) {
         const row = lastData[i];
         const rowTimestamp = new Date(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
-        const rowPatrimonio = row[COLUMN_INDICES.REPORTS.PATRIMONIO - 1];
-        const rowStatus = row[COLUMN_INDICES.REPORTS.STATUS - 1];
-        const rowMotorista = row[COLUMN_INDICES.REPORTS.MOTORISTA - 1];
+        const rowPatrimonio = (row[COLUMN_INDICES.REPORTS.PATRIMONIO - 1] || '').toString().trim();
+        const rowStatus = (row[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim();
+        const rowObservacao = (row[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim();
+        const rowLocalidade = (row[COLUMN_INDICES.REPORTS.LOCALIDADE - 1] || '').toString().trim();
+        const rowMotorista = (row[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
 
-        // Se for a mesma bike, mesmo status, mesmo motorista e em menos de 60 segundos
-        if (String(rowPatrimonio) === String(patrimonio) && String(rowStatus) === String(status) && String(rowMotorista) === String(motorista)) {
-          const diff = (now.getTime() - rowTimestamp.getTime()) / 1000;
-          if (diff < 60) {
-            return { success: true, message: "Registro duplicado ignorado." };
+        // Critérios de duplicidade: mesma bike, mesmo status e mesmo local (observação ou localidade)
+        // Também verificamos se é o mesmo motorista para evitar falsos positivos se dois motoristas virem a mesma bike
+        const isSamePlace = (rowObservacao === observacao || rowLocalidade === localidade || 
+                            (rowObservacao === localidade && rowObservacao !== "") || 
+                            (rowLocalidade === observacao && rowLocalidade !== ""));
+        
+        if (rowPatrimonio === patrimonio && rowStatus === status && isSamePlace && rowMotorista === motorista) {
+          const diffMinutes = Math.abs(now.getTime() - rowTimestamp.getTime()) / (1000 * 60);
+          
+          // Se for em menos de 10 minutos, consideramos duplicata e não adicionamos a nova linha
+          if (diffMinutes < 10) {
+            console.log(`Duplicidade detectada para bike ${patrimonio} em ${rowObservacao || rowLocalidade}. Ignorando nova entrada.`);
+            return { success: true, message: "Registro duplicado detectado e ignorado." };
           }
         }
       }
@@ -1060,6 +1076,13 @@ function logReport(rowData, kmFinal, plate) {
       // Se a bike for registrada com qualquer outro status, ela foi "encontrada"
       resolveAlert(patrimonio, motorista || 'Sistema');
       resolveVandalized(patrimonio, motorista || 'Sistema');
+    }
+
+    // Limpeza de duplicatas recentes (garantia extra)
+    try {
+      cleanupRecentDuplicates();
+    } catch (e) {
+      console.error("Erro na limpeza de duplicatas:", e);
     }
 
     return { success: true };
@@ -2774,5 +2797,85 @@ function clearAdminAlerts(adminName) {
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Remove duplicatas recentes da aba de relatórios.
+ * Verifica as últimas 100 linhas e exclui a segunda ocorrência de registros idênticos em curto intervalo.
+ */
+function cleanupRecentDuplicates() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sheet = ss.getSheetByName(REPORT_SHEET_NAME);
+    if (!sheet) return 0;
+    
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 3) return 0;
+    
+    // Aumentamos para 200 linhas para garantir que pegamos duplicatas mais antigas se necessário
+    const numRows = Math.min(lastRow - 1, 200);
+    const startRow = lastRow - numRows + 1;
+    const data = sheet.getRange(startRow, 1, numRows, sheet.getLastColumn()).getValues();
+    const rowsToDelete = [];
+    
+    for (let i = data.length - 1; i >= 1; i--) {
+      const current = data[i];
+      const currentTimestamp = new Date(current[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
+      const currentPatrimonio = (current[COLUMN_INDICES.REPORTS.PATRIMONIO - 1] || '').toString().trim();
+      const currentStatus = (current[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim();
+      const currentObservacao = (current[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim();
+      const currentLocalidade = (current[COLUMN_INDICES.REPORTS.LOCALIDADE - 1] || '').toString().trim();
+      const currentMotorista = (current[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
+      
+      if (!currentPatrimonio || isNaN(currentTimestamp.getTime())) continue;
+
+      for (let j = i - 1; j >= 0; j--) {
+        const prev = data[j];
+        const prevTimestamp = new Date(prev[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
+        const prevPatrimonio = (prev[COLUMN_INDICES.REPORTS.PATRIMONIO - 1] || '').toString().trim();
+        const prevStatus = (prev[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim();
+        const prevObservacao = (prev[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim();
+        const prevLocalidade = (prev[COLUMN_INDICES.REPORTS.LOCALIDADE - 1] || '').toString().trim();
+        const prevMotorista = (prev[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
+        
+        const sameBike = (currentPatrimonio === prevPatrimonio);
+        const sameStatus = (currentStatus === prevStatus);
+        const sameDriver = (currentMotorista === prevMotorista);
+        const samePlace = (currentObservacao === prevObservacao || currentLocalidade === prevLocalidade || 
+                           (currentObservacao === prevLocalidade && currentObservacao !== "") || 
+                           (currentLocalidade === prevObservacao && currentLocalidade !== ""));
+        
+        if (sameBike && sameStatus && samePlace && sameDriver) {
+          const diffMinutes = Math.abs(currentTimestamp.getTime() - prevTimestamp.getTime()) / (1000 * 60);
+          // Se for em menos de 10 minutos, consideramos duplicata
+          if (diffMinutes < 10) {
+            rowsToDelete.push(startRow + i);
+            console.log(`Marcando linha ${startRow + i} para exclusão (duplicata de ${startRow + j})`);
+            break;
+          }
+        }
+      }
+    }
+    
+    // Remove duplicatas da lista para não tentar excluir a mesma linha duas vezes
+    const uniqueRowsToDelete = [...new Set(rowsToDelete)].sort((a, b) => b - a);
+    
+    uniqueRowsToDelete.forEach(row => {
+      try {
+        sheet.deleteRow(row);
+      } catch (e) {
+        console.error(`Erro ao excluir linha ${row}:`, e);
+      }
+    });
+    
+    if (uniqueRowsToDelete.length > 0) {
+      SpreadsheetApp.flush();
+    }
+    
+    return uniqueRowsToDelete.length;
+  } finally {
+    lock.releaseLock();
   }
 }
