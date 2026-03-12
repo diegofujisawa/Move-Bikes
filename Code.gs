@@ -1749,10 +1749,8 @@ function updateDriverState(driverName, routeBikes, collectedBikes) {
     const collectedString = Array.isArray(collectedBikes) ? [...new Set(collectedBikes.map(b => String(b).trim()))].filter(Boolean).join(', ') : '';
 
     if (rowIndex !== -1) {
-      // OTIMIZAÇÃO: Atualiza as duas colunas em uma única chamada se forem adjacentes (não são, então usamos batch se possível)
-      // No caso atual, as colunas são 3 e 4, então podemos atualizar o range (rowIndex, 3, 1, 2)
+      // OTIMIZAÇÃO: Atualiza as duas colunas em uma única chamada se forem adjacentes
       const range = sheet.getRange(rowIndex, Math.min(COLUMN_INDICES.STATE.ROTEIRO, COLUMN_INDICES.STATE.RECOLHIDAS), 1, 2);
-      // Assume que ROTEIRO é 3 e RECOLHIDAS é 4
       range.setValues([[routeString, collectedString]]);
     } else {
       // Adiciona uma nova linha se o motorista não existir
@@ -1761,6 +1759,40 @@ function updateDriverState(driverName, routeBikes, collectedBikes) {
       newRow[COLUMN_INDICES.STATE.ROTEIRO - 1] = routeString;
       newRow[COLUMN_INDICES.STATE.RECOLHIDAS - 1] = collectedString;
       sheet.appendRow(newRow);
+    }
+
+    // GARANTIA DE UNICIDADE: Remove as bikes recolhidas de qualquer outro motorista
+    if (Array.isArray(collectedBikes) && collectedBikes.length > 0) {
+      const allData = sheet.getDataRange().getValues();
+      const bikesToClean = collectedBikes.map(b => String(b).trim()).filter(Boolean);
+      
+      for (let i = 1; i < allData.length; i++) {
+        const otherDriver = allData[i][COLUMN_INDICES.STATE.MOTORISTA - 1];
+        // Pula o próprio motorista que acabou de ser atualizado
+        if (String(otherDriver).toLowerCase() === String(driverName).toLowerCase()) continue;
+        
+        let otherRoute = (allData[i][COLUMN_INDICES.STATE.ROTEIRO - 1] || '').toString().split(',').map(s => s.trim()).filter(Boolean);
+        let otherCollected = (allData[i][COLUMN_INDICES.STATE.RECOLHIDAS - 1] || '').toString().split(',').map(s => s.trim()).filter(Boolean);
+        
+        let changed = false;
+        bikesToClean.forEach(bike => {
+          const rIdx = otherRoute.indexOf(bike);
+          if (rIdx !== -1) {
+            otherRoute.splice(rIdx, 1);
+            changed = true;
+          }
+          const cIdx = otherCollected.indexOf(bike);
+          if (cIdx !== -1) {
+            otherCollected.splice(cIdx, 1);
+            changed = true;
+          }
+        });
+        
+        if (changed) {
+          sheet.getRange(i + 1, COLUMN_INDICES.STATE.ROTEIRO).setValue(otherRoute.join(', '));
+          sheet.getRange(i + 1, COLUMN_INDICES.STATE.RECOLHIDAS).setValue(otherCollected.join(', '));
+        }
+      }
     }
 
     return { success: true };

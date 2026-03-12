@@ -649,6 +649,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         const originalRouteBikes = [...routeBikes];
 
         setProcessingBikes(prev => new Set(prev).add(bikeNumber));
+        isUpdatingStateRef.current = true;
 
         // ATUALIZAÇÃO OTIMISTA: Limpa a busca e atualiza as listas imediatamente
         setSearchedBike(null);
@@ -658,6 +659,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         if (status === 'Recolhida') {
             if (collectedBikes.includes(bikeNumber)) {
                 alert(`Você já está em posse da bicicleta ${bikeNumber}.`);
+                isUpdatingStateRef.current = false;
                 setProcessingBikes(prev => {
                     const next = new Set(prev);
                     next.delete(bikeNumber);
@@ -670,29 +672,38 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             setCollectedBikes(newCollectedBikes);
             setRouteBikes(newRouteBikes);
             
-            // Sincroniza em background
-            apiCall({
-                action: 'updateDriverState',
-                driverName,
-                routeBikes: newRouteBikes,
-                collectedBikes: newCollectedBikes
-            }).then(result => {
+            setIsLoading(true);
+            // Sincroniza e loga no relatório
+            try {
+                const result = await apiCall({
+                    action: 'finalizeRouteBike',
+                    driverName,
+                    bikeNumber,
+                    finalStatus: 'Recolhida',
+                    finalObservation: 'Recolhida via busca/scanner',
+                    routeBikes: newRouteBikes,
+                    collectedBikes: newCollectedBikes
+                });
+
                 if (!result.success) {
-                    setError(`Falha ao sincronizar estado da bike ${bikeNumber}.`);
-                    setCollectedBikes(originalCollectedBikes);
-                    setRouteBikes(originalRouteBikes);
+                    throw new Error(result.error || 'Falha ao sincronizar estado.');
                 }
-            }).catch(() => {
-                setError(`Erro de conexão ao sincronizar bike ${bikeNumber}.`);
+                alert(`Bicicleta ${bikeNumber} recolhida com sucesso!`);
+            } catch (err: any) {
+                setError(`Erro ao recolher bike ${bikeNumber}: ${err.message}`);
                 setCollectedBikes(originalCollectedBikes);
                 setRouteBikes(originalRouteBikes);
-            }).finally(() => {
+                setSearchedBike(originalSearchedBike);
+                setSearchTerm(originalSearchTerm);
+            } finally {
+                setIsLoading(false);
+                isUpdatingStateRef.current = false;
                 setProcessingBikes(prev => {
                     const next = new Set(prev);
                     next.delete(bikeNumber);
                     return next;
                 });
-            });
+            }
             
             return; 
         }
@@ -726,6 +737,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             setError(err.message || `Ocorreu um erro ao processar a ação: ${status}`);
         } finally {
             setIsLoading(false);
+            isUpdatingStateRef.current = false;
             setProcessingBikes(prev => {
                 const next = new Set(prev);
                 next.delete(bikeNumber);
