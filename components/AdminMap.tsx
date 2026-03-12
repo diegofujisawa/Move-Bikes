@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { LogoutIcon, MapIcon, XIcon, MovingIcon } from './icons';
+import { LogoutIcon, MapIcon, XIcon } from './icons';
 import { DriverLocation } from '../types';
 import { apiGetCall } from '../api';
 import L from 'leaflet';
@@ -13,17 +13,6 @@ interface AdminMapProps {
   onClose: () => void;
 }
 
-const normalizeCoord = (coord: number): number => {
-    if (isNaN(coord) || coord === null) return coord;
-    let val = coord;
-    if (Math.abs(val) > 1000) {
-        while (Math.abs(val) > 180) {
-            val /= 10;
-        }
-    }
-    return val;
-};
-
 const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -31,7 +20,6 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
   const mapRef = useRef<L.Map | null>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const markersRef = useRef<{ [key: string]: L.Marker }>({});
-  const hasCenteredRef = useRef(false);
   
   const fetchLocationsAndUpdateMap = useCallback(async () => {
     try {
@@ -62,16 +50,11 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
           const map = mapRef.current;
           const currentMarkers = markersRef.current;
           const activeDrivers = new Set<string>();
-          const markerGroup: L.LatLng[] = [];
+          const markerGroup: L.LatLngExpression[] = [];
 
           locations.forEach(loc => {
               const { driverName, latitude, longitude } = loc;
-              const normLat = normalizeCoord(latitude);
-              const normLng = normalizeCoord(longitude);
-              
-              if (isNaN(normLat) || isNaN(normLng)) return;
-
-              const position = L.latLng(normLat, normLng);
+              const position: L.LatLngExpression = [latitude, longitude];
               activeDrivers.add(driverName);
               markerGroup.push(position);
 
@@ -92,11 +75,9 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
               }
           });
 
-          // Centraliza automaticamente na primeira vez que houver motoristas
-          if (markerGroup.length > 0 && !hasCenteredRef.current) {
+          if (markerGroup.length > 0 && isLoading) {
               const bounds = L.latLngBounds(markerGroup);
-              map.fitBounds(bounds, { padding: [70, 70] });
-              hasCenteredRef.current = true;
+              map.fitBounds(bounds, { padding: [50, 50] });
           }
 
           Object.keys(currentMarkers).forEach(driverName => {
@@ -110,18 +91,7 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ocorreu um erro ao buscar localizações.');
     }
-  }, []);
-
-  const handleRecenter = () => {
-      if (mapRef.current) {
-          const markers = Object.values(markersRef.current);
-          if (markers.length > 0) {
-              const group = markers.map(m => m.getLatLng());
-              const bounds = L.latLngBounds(group);
-              mapRef.current.fitBounds(bounds, { padding: [70, 70] });
-          }
-      }
-  };
+  }, [isLoading]);
 
   useEffect(() => {
     let isMounted = true;
@@ -156,14 +126,6 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
           <h2 className="font-semibold text-gray-700">Mapa de Motoristas (OpenStreetMap - Gratuito)</h2>
         </div>
         <div className="flex items-center gap-2">
-            <button 
-                onClick={handleRecenter} 
-                title="Centralizar Motoristas" 
-                className="flex items-center gap-2 px-3 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm"
-            >
-                <MovingIcon className="w-4 h-4" />
-                <span>Centralizar</span>
-            </button>
             <button onClick={onClose} title="Fechar Mapa" className="p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-gray-800 transition-colors">
                 <XIcon className="w-5 h-5" />
             </button>

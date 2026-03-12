@@ -1210,7 +1210,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         fetchStations(); // Estações mudam pouco, busca uma vez
 
         // ATUALIZAÇÃO: Intervalo aumentado de 3s para 10s para reduzir carga no servidor
-        const interval = setInterval(() => refreshAll(), 30000); 
+        const interval = setInterval(() => refreshAll(), 10000); 
 
         const handleVisibilityChange = () => {
             if (document.visibilityState === 'visible') {
