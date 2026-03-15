@@ -10,6 +10,7 @@ interface DestinationModalProps {
   bikeNumber: string;
   stationName?: string;
   isLoading: boolean;
+  onRecalculate?: () => void;
 }
 
 const DestinationModal: React.FC<DestinationModalProps> = ({ 
@@ -19,7 +20,8 @@ const DestinationModal: React.FC<DestinationModalProps> = ({
   type, 
   bikeNumber, 
   stationName,
-  isLoading 
+  isLoading,
+  onRecalculate
 }) => {
   if (!isOpen) return null;
 
@@ -58,11 +60,23 @@ const DestinationModal: React.FC<DestinationModalProps> = ({
 
           {type === 'Estação' && (
             <div className="space-y-4">
-              <div className="p-4 bg-blue-50 border border-blue-100 rounded-lg">
+              <div className="p-4 bg-blue-50 border border-blue-100 rounded-lg flex justify-between items-center">
                 <p className="text-sm text-blue-800">
                   Estação detectada: <br />
                   <strong className="text-base">{stationName || 'Buscando localização...'}</strong>
                 </p>
+                {onRecalculate && (
+                  <button 
+                    onClick={onRecalculate}
+                    disabled={isLoading}
+                    className="p-2 text-blue-600 hover:bg-blue-100 rounded-full transition-colors"
+                    title="Recalcular localização"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className={`w-5 h-5 ${stationName === 'Buscando...' ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  </button>
+                )}
               </div>
               <div className="flex gap-3 mt-6">
                 <button

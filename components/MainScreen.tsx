@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { BicycleData, PickupRequest, DriverLocation } from '../types';
-import { LogoutIcon, PlusIcon, PlusPlusIcon, MapIcon, SheetIcon, SearchIcon, AlertIcon, CalendarIcon, CarIcon, XIcon, BicycleIcon, MovingIcon, UserIcon, AlertTriangleIcon, RefreshIcon, QrCodeIcon, TrailerIcon } from './icons';
+import { LogoutIcon, PlusIcon, PlusPlusIcon, MapIcon, SheetIcon, SearchIcon, AlertIcon, CalendarIcon, CarIcon, XIcon, BicycleIcon, MovingIcon, UserIcon, AlertTriangleIcon, QrCodeIcon, TrailerIcon, SwitchIcon } from './icons';
 import { Html5Qrcode } from 'html5-qrcode';
 import ScheduleModal from './ScheduleModal';
 import ReporModal from './ReporModal';
@@ -28,9 +28,11 @@ interface MainScreenProps {
 
 const normalizeCoord = (coord: number): number => {
     if (isNaN(coord) || coord === null) return coord;
+    // Coordenadas válidas estão entre -180 e 180. Se já estiver no range, retorna imediato.
+    if (coord >= -180 && coord <= 180) return coord;
+    
     let val = coord;
     // Se o valor for muito grande (ex: -23550000), provavelmente está sem o ponto decimal
-    // Coordenadas válidas estão entre -180 e 180.
     if (Math.abs(val) > 1000) {
         while (Math.abs(val) > 180) {
             val /= 10;
@@ -133,6 +135,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const [statusTimeRange, setStatusTimeRange] = useState<'24h' | '48h' | '72h' | 'week'>('24h');
     const [backendVersion, setBackendVersion] = useState<string | null>(null);
     const [userSchedule, setUserSchedule] = useState<Record<string, string>>({});
+    const [isScheduleLoading, setIsScheduleLoading] = useState(false);
     const [destinationModal, setDestinationModal] = useState<{
         isOpen: boolean;
         bikeNumber: string;
@@ -247,6 +250,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     };
 
     const fetchSchedule = async () => {
+        setIsScheduleLoading(true);
         try {
             const result = await apiCall({ action: 'getSchedule', driverName });
             if (result.success) {
@@ -256,6 +260,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             }
         } catch (err) {
             console.error("Erro ao buscar escala:", err);
+        } finally {
+            setIsScheduleLoading(false);
         }
     };
 
@@ -479,8 +485,11 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             setCollectedBikes(newCollectedBikes);
             setRouteBikes(newRouteBikes);
         } else {
+            // Se for roteiro normal, adiciona ao roteiro e garante que não estejam nas recolhidas (caso estivessem)
             newRouteBikes = [...new Set([...routeBikes, ...bikesToAdd])];
+            newCollectedBikes = collectedBikes.filter(b => !bikesToAdd.includes(String(b)));
             setRouteBikes(newRouteBikes);
+            setCollectedBikes(newCollectedBikes);
         }
 
         setIsLoading(true);
@@ -641,7 +650,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 (err) => {
                     reject(new Error(`Erro ao obter localização: ${err.message}`));
                 },
-                { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
+                { enableHighAccuracy: true, timeout: 5000, maximumAge: 3000 }
             );
         });
     };
@@ -694,7 +703,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 if (!result.success) {
                     throw new Error(result.error || 'Falha ao sincronizar estado.');
                 }
-                // Removido alert para agilizar o processo
+                // Força uma atualização após um pequeno delay para garantir que o servidor processou
+                setTimeout(() => refreshAll(true), 2000);
             } catch (err: any) {
                 setError(`Erro ao recolher bike ${bikeNumber}: ${err.message}`);
                 setCollectedBikes(originalCollectedBikes);
@@ -730,7 +740,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 if (!reportResult.success) {
                     throw new Error(reportResult.error || 'Falha ao registrar "Não encontrada".');
                 }
-                // Removido alert para agilizar o processo
+                // Força uma atualização após um pequeno delay
+                setTimeout(() => refreshAll(true), 2000);
             }
         } catch (err: any) {
             // ROLLBACK em caso de erro
@@ -872,21 +883,6 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
 
     
 
-    const handleRecolherClick = async (bikeNumber: string) => {
-        if (processingBikesRef.current.has(bikeNumber)) return;
-        
-        setIsLoading(true); 
-        processingBikesRef.current.add(bikeNumber);
-        setProcessingBikes(new Set(processingBikesRef.current));
-
-        // Apenas inicia a consulta, sem remover do roteiro
-        handleSearch(bikeNumber); 
-
-        setIsLoading(false);
-        processingBikesRef.current.delete(bikeNumber);
-        setProcessingBikes(new Set(processingBikesRef.current));
-    };
-
     const handleNaoAtendidaClick = async (bikeNumberInput: string | number, silent = false) => {
         const bikeNumber = String(bikeNumberInput);
         // Salva o estado original para rollback
@@ -910,8 +906,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
 
             if (!result.success) throw new Error(result.error || 'Falha ao registrar no relatório.');
 
-            // Se tudo deu certo, a UI já está correta.
-
+            // Força uma atualização após um pequeno delay
+            setTimeout(() => refreshAll(true), 2000);
         } catch (err: any) {
             // ROLLBACK: Se qualquer chamada falhar, restaura o estado original
             if (!silent) {
@@ -926,35 +922,77 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         }
     };
 
+    const recalculateStation = async () => {
+        const bikeNumber = destinationModal.bikeNumber;
+        setDestinationModal(prev => ({ ...prev, stationName: 'Buscando...' }));
+        
+        try {
+            const userLocation = await getCurrentPosition();
+            const closestStation = stations.reduce((prev, curr) => {
+                const dist = getDistanceInMeters(userLocation.latitude, userLocation.longitude, curr.Latitude, curr.Longitude);
+                return (dist < prev.minDistance) ? { station: curr, minDistance: dist } : prev;
+            }, { station: null, minDistance: Infinity });
+
+            const stationName = (closestStation.station && closestStation.minDistance <= 50) ? closestStation.station.Name : 'Fora da Estação';
+            setDestinationModal(prev => {
+                if (prev.isOpen && prev.bikeNumber === bikeNumber) {
+                    return { ...prev, stationName };
+                }
+                return prev;
+            });
+        } catch {
+            setDestinationModal(prev => {
+                if (prev.isOpen && prev.bikeNumber === bikeNumber) {
+                    return { ...prev, stationName: 'Fora da Estação' };
+                }
+                return prev;
+            });
+        }
+    };
+
     const handleCollectedBikeAction = (bikeNumber: string, status: string) => {
         if (status === 'Enviada para Estação') {
-            setDestinationModal({ isOpen: true, bikeNumber, type: 'Estação', stationName: 'Buscando...' });
+            // OTIMIZAÇÃO: Tenta usar a localização já rastreada pelo watchPosition para ser instantâneo
+            let initialStationName = 'Buscando...';
             
-            // Busca localização e estação mais próxima em background para não travar a abertura do modal
-            (async () => {
-                try {
-                    const userLocation = await getCurrentPosition();
-                    const closestStation = stations.reduce((prev, curr) => {
-                        const dist = getDistanceInMeters(userLocation.latitude, userLocation.longitude, curr.Latitude, curr.Longitude);
-                        return (dist < prev.minDistance) ? { station: curr, minDistance: dist } : prev;
-                    }, { station: null, minDistance: Infinity });
+            if (currentDriverLocation) {
+                const closestStation = stations.reduce((prev, curr) => {
+                    const dist = getDistanceInMeters(currentDriverLocation.lat, currentDriverLocation.lng, curr.Latitude, curr.Longitude);
+                    return (dist < prev.minDistance) ? { station: curr, minDistance: dist } : prev;
+                }, { station: null, minDistance: Infinity });
 
-                    const stationName = (closestStation.station && closestStation.minDistance <= 50) ? closestStation.station.Name : 'Fora da Estação';
-                    setDestinationModal(prev => {
-                        if (prev.isOpen && prev.bikeNumber === bikeNumber) {
-                            return { ...prev, stationName };
-                        }
-                        return prev;
-                    });
-                } catch {
-                    setDestinationModal(prev => {
-                        if (prev.isOpen && prev.bikeNumber === bikeNumber) {
-                            return { ...prev, stationName: 'Fora da Estação' };
-                        }
-                        return prev;
-                    });
-                }
-            })();
+                initialStationName = (closestStation.station && closestStation.minDistance <= 50) ? closestStation.station.Name : 'Fora da Estação';
+            }
+
+            setDestinationModal({ isOpen: true, bikeNumber, type: 'Estação', stationName: initialStationName });
+            
+            // Se não tínhamos localização em cache, busca agora
+            if (initialStationName === 'Buscando...') {
+                (async () => {
+                    try {
+                        const userLocation = await getCurrentPosition();
+                        const closestStation = stations.reduce((prev, curr) => {
+                            const dist = getDistanceInMeters(userLocation.latitude, userLocation.longitude, curr.Latitude, curr.Longitude);
+                            return (dist < prev.minDistance) ? { station: curr, minDistance: dist } : prev;
+                        }, { station: null, minDistance: Infinity });
+
+                        const stationName = (closestStation.station && closestStation.minDistance <= 50) ? closestStation.station.Name : 'Fora da Estação';
+                        setDestinationModal(prev => {
+                            if (prev.isOpen && prev.bikeNumber === bikeNumber) {
+                                return { ...prev, stationName };
+                            }
+                            return prev;
+                        });
+                    } catch {
+                        setDestinationModal(prev => {
+                            if (prev.isOpen && prev.bikeNumber === bikeNumber) {
+                                return { ...prev, stationName: 'Fora da Estação' };
+                            }
+                            return prev;
+                        });
+                    }
+                })();
+            }
         } else if (status === 'Enviada para Filial') {
             setDestinationModal({ isOpen: true, bikeNumber, type: 'Filial' });
         } else if (status === 'Vandalizada') {
@@ -990,10 +1028,10 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             let finalObservation = observation;
 
             if (status === 'Enviada para Estação') {
-                finalStatus = 'ESTAÇÃO'; 
+                finalStatus = 'Estação'; 
                 finalObservation = observation; 
             } else if (status === 'Enviada para Filial') {
-                finalStatus = 'Filial';
+                finalStatus = 'Recolhida';
                 finalObservation = observation; 
             } else if (status === 'Vandalizada') {
                 finalStatus = 'Vandalizada';
@@ -1009,8 +1047,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             });
 
             if (result.success) {
-                // Removido alert e refreshAll para agilizar o processo
-                // O estado otimista já removeu a bike da UI
+                // Força uma atualização após um pequeno delay
+                setTimeout(() => refreshAll(true), 2000);
             } else {
                 throw new Error(result.error || `Falha ao registrar "${status}".`);
             }
@@ -1052,6 +1090,21 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     
 
     useEffect(() => {
+        // GARANTIA DE UNICIDADE: Uma bike nunca pode estar no roteiro e nas recolhidas ao mesmo tempo
+        const collectedSet = new Set(collectedBikes.map(b => String(b)));
+        const hasOverlap = routeBikes.some(b => collectedSet.has(String(b)));
+        
+        if (hasOverlap) {
+            setRouteBikes(prev => {
+                const filtered = prev.filter(b => !collectedSet.has(String(b)));
+                // Só atualiza se houver mudança real para evitar loops
+                if (filtered.length !== prev.length) return filtered;
+                return prev;
+            });
+        }
+    }, [routeBikes, collectedBikes]);
+
+    useEffect(() => {
         // Detalhes do roteiro agora são atualizados via refreshAll (sync)
     }, [routeBikes, collectedBikes, driverName]);
 
@@ -1082,7 +1135,13 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         try {
             const result = await apiGetCall('getStations');
             if (result.success && result.data) {
-                setStations(result.data);
+                // Pre-normaliza as coordenadas para acelerar cálculos futuros de distância
+                const normalizedStations = result.data.map((s: any) => ({
+                    ...s,
+                    Latitude: normalizeCoord(s.Latitude),
+                    Longitude: normalizeCoord(s.Longitude)
+                }));
+                setStations(normalizedStations);
             }
         } catch (err: any) {
             console.error('Erro ao buscar estações:', err.message);
@@ -1115,9 +1174,17 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 if (d.requests) setPendingRequests(d.requests);
                 
                 // 2. Driver State
-                if (d.driverState && !isUpdatingStateRef.current && (Date.now() - lastManualUpdateRef.current > 5000)) {
-                    setRouteBikes([...new Set((d.driverState.routeBikes || []).map(b => String(b)))]);
-                    setCollectedBikes([...new Set((d.driverState.collectedBikes || []).map(b => String(b)))]);
+                if (d.driverState && !isUpdatingStateRef.current && (Date.now() - lastManualUpdateRef.current > 10000)) {
+                    const serverCollected = [...new Set((d.driverState.collectedBikes || []).map(b => String(b)))];
+                    // GARANTIA DE UNICIDADE: Se está recolhida, não pode estar no roteiro
+                    const serverRoute = [...new Set((d.driverState.routeBikes || []).map(b => String(b)))].filter(b => !serverCollected.includes(b));
+                    
+                    // FILTRAGEM ADICIONAL: Remove bikes que ainda estão em processamento local
+                    const filteredRoute = serverRoute.filter(b => !processingBikesRef.current.has(b));
+                    const filteredCollected = serverCollected.filter(b => !processingBikesRef.current.has(b));
+
+                    setRouteBikes(filteredRoute);
+                    setCollectedBikes(filteredCollected);
                 }
                 
                 // 3. Bike Statuses (Conflicts)
@@ -1208,8 +1275,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         refreshAll();
         fetchStations(); // Estações mudam pouco, busca uma vez
 
-        // ATUALIZAÇÃO: Intervalo aumentado de 3s para 10s para reduzir carga no servidor
-        const interval = setInterval(() => refreshAll(), 30000); 
+        // ATUALIZAÇÃO: Sincronização automática a cada 3 segundos conforme solicitado
+        const interval = setInterval(() => refreshAll(), 3000); 
 
         const handleVisibilityChange = () => {
             if (document.visibilityState === 'visible') {
@@ -1431,14 +1498,14 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                             </span>
                         )}
                     </button>
-                            {category.includes('ADM') && (
+                             {category.includes('ADM') && (
                                 <button onClick={onShowMap} disabled={isLoading} title="Ver Mapa em Tempo Real" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
                                     <MapIcon className="w-6 h-6 sm:w-7 sm:h-7"/>
                                 </button>
                             )}
                             {category.toUpperCase() === 'MOTORISTA' && (
                                 <button onClick={() => setIsVehicleModalOpen(true)} disabled={isLoading} title="Trocar Veículo" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
-                                    <RefreshIcon className="w-6 h-6 sm:w-7 sm:h-7" />
+                                    <SwitchIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                                 </button>
                             )}
                             {category.toUpperCase() === 'MOTORISTA' && (
@@ -2068,7 +2135,10 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                                     Não Atendida
                                                 </button>
                                                 <button 
-                                                    onClick={() => handleRecolherClick(bike)}
+                                                    onClick={() => {
+                                                        // Simula uma busca para abrir os botões de ação (Recolhida / Não encontrada)
+                                                        handleSearch(bike);
+                                                    }}
                                                     disabled={isLoading || processingBikes.has(bike)}
                                                     className="flex-1 px-2 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 active:scale-95 transition-all disabled:bg-gray-400 text-[10px] font-bold uppercase"
                                                 >
@@ -2174,6 +2244,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 bikeNumber={destinationModal.bikeNumber}
                 stationName={destinationModal.stationName}
                 isLoading={isLoading}
+                onRecalculate={recalculateStation}
             />
 
             <HistoryModal 
@@ -2189,6 +2260,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 onClose={() => setIsScheduleModalOpen(false)}
                 schedule={userSchedule}
                 driverName={driverName}
+                isLoading={isScheduleLoading}
             />
 
             <VehicleSwitchModal 

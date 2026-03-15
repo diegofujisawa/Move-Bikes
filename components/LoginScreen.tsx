@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BicycleIcon, UserIcon, LockClosedIcon, AlertTriangleIcon } from './icons';
+import { UserIcon, LockClosedIcon, AlertTriangleIcon } from './icons';
 import { User } from '../types';
 import { apiCall, checkApiConnection } from '../api';
 
@@ -157,8 +157,13 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
   return (
     <div className="bg-white p-8 rounded-xl shadow-lg animate-fade-in-down w-full max-w-md">
       <div className="flex flex-col items-center mb-6">
-        <BicycleIcon className="w-16 h-16 text-blue-600" />
-        <h1 className="text-3xl font-bold text-gray-800 mt-4 text-center">Registro de Recolha</h1>
+        <img 
+          src="https://lh3.googleusercontent.com/d/1vkdVVCTgdaX9ovR1imAyCwSeMGmfyOSR" 
+          alt="Logo" 
+          className="w-48 h-auto mb-2" 
+          referrerPolicy="no-referrer"
+        />
+        <h1 className="text-3xl font-bold text-gray-800 mt-2 text-center">Registro de Recolha</h1>
         <p className="text-gray-500 mt-1">Identifique-se para continuar</p>
       </div>
       

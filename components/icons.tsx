@@ -164,3 +164,19 @@ export const TrailerIcon: React.FC<IconProps> = ({ className = "w-6 h-6" }) => (
   </svg>
 );
 
+export const TruckIcon: React.FC<IconProps> = ({ className = "w-6 h-6" }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2" />
+    <path d="M15 18H9" />
+    <path d="M19 18h2a1 1 0 0 0 1-1v-5l-4-4h-3v10h3Z" />
+    <circle cx="7" cy="18" r="2" />
+    <circle cx="17" cy="18" r="2" />
+  </svg>
+);
+
+export const SwitchIcon: React.FC<IconProps> = ({ className = "w-6 h-6" }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+  </svg>
+);
+

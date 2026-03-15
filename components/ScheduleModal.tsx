@@ -6,9 +6,10 @@ interface ScheduleModalProps {
     onClose: () => void;
     schedule: Record<string, string>;
     driverName: string;
+    isLoading?: boolean;
 }
 
-const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose, schedule, driverName }) => {
+const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose, schedule, driverName, isLoading }) => {
     if (!isOpen) return null;
 
     const getDayOrder = (day: string): number => {
@@ -64,42 +65,64 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose, schedule
     });
 
     return (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-fade-in-up">
-                <div className="p-4 border-b flex justify-between items-center bg-blue-600 text-white">
-                    <h2 className="text-lg font-bold">Minha Escala - {driverName}</h2>
-                    <button onClick={onClose} className="p-1 hover:bg-blue-700 rounded-full transition-colors">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-fade-in-up border border-gray-100">
+                <div className="p-5 border-b flex justify-between items-center bg-gradient-to-r from-blue-600 to-blue-700 text-white">
+                    <div>
+                        <h2 className="text-xl font-bold tracking-tight">Escala de Trabalho</h2>
+                        <p className="text-blue-100 text-xs mt-0.5">{driverName}</p>
+                    </div>
+                    <button onClick={onClose} className="p-2 hover:bg-white/20 rounded-full transition-all active:scale-90">
                         <XIcon className="w-6 h-6" />
                     </button>
                 </div>
                 
-                <div className="p-4 max-h-[70vh] overflow-y-auto">
-                    {sortedDates.length > 0 ? (
-                        <div className="space-y-2">
-                            {sortedDates.map(date => (
-                                <div key={date} className="flex justify-between items-center p-3 border rounded-lg hover:bg-gray-50 transition-colors">
-                                    <span className="font-medium text-gray-700">{date}</span>
-                                    <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase ${
-                                        (schedule[date] || '').toLowerCase().includes('folga') 
-                                        ? 'bg-green-100 text-green-700' 
-                                        : 'bg-blue-100 text-blue-700'
-                                    }`}>
-                                        {schedule[date]}
-                                    </span>
-                                </div>
-                            ))}
+                <div className="p-0 max-h-[65vh] overflow-y-auto bg-gray-50">
+                    {isLoading ? (
+                        <div className="flex flex-col items-center justify-center py-20">
+                            <div className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+                            <p className="text-gray-500 text-sm font-medium">Buscando sua escala...</p>
+                        </div>
+                    ) : sortedDates.length > 0 ? (
+                        <div className="divide-y divide-gray-100">
+                            {sortedDates.map(date => {
+                                const status = schedule[date] || '';
+                                const isFolga = status.toLowerCase().includes('folga');
+                                
+                                return (
+                                    <div key={date} className="flex justify-between items-center p-4 bg-white hover:bg-blue-50/30 transition-colors">
+                                        <div className="flex flex-col">
+                                            <span className="text-sm font-semibold text-gray-900">{date}</span>
+                                            <span className="text-[10px] text-gray-400 uppercase tracking-wider font-medium">Dia Programado</span>
+                                        </div>
+                                        <div className={`px-4 py-1.5 rounded-lg text-xs font-bold shadow-sm border ${
+                                            isFolga 
+                                            ? 'bg-emerald-50 text-emerald-700 border-emerald-100' 
+                                            : 'bg-blue-50 text-blue-700 border-blue-100'
+                                        }`}>
+                                            {status}
+                                        </div>
+                                    </div>
+                                );
+                            })}
                         </div>
                     ) : (
-                        <p className="text-center text-gray-500 py-8">Nenhuma escala encontrada para você.</p>
+                        <div className="flex flex-col items-center justify-center py-12 px-6 text-center">
+                            <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mb-4">
+                                <XIcon className="w-8 h-8 text-gray-300" />
+                            </div>
+                            <p className="text-gray-500 font-medium">Nenhuma escala encontrada.</p>
+                            <p className="text-gray-400 text-xs mt-1">Sua escala será exibida aqui assim que for atualizada no sistema.</p>
+                        </div>
                     )}
                 </div>
                 
-                <div className="p-4 border-t bg-gray-50 flex justify-end">
+                <div className="p-5 border-t bg-white flex justify-center">
                     <button 
                         onClick={onClose}
-                        className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors font-medium"
+                        className="w-full py-3 bg-gray-900 text-white rounded-xl hover:bg-black active:scale-[0.98] transition-all font-bold text-sm shadow-lg shadow-gray-200"
                     >
-                        Fechar
+                        Entendido
                     </button>
                 </div>
             </div>
