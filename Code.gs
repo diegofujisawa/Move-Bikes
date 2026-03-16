@@ -1262,6 +1262,15 @@ function getOrCreateSheet(activeSS, sheetName, headers) {
 }
 
 function getAlerts() {
+  const cacheKey = 'alerts_data';
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    try {
+      return { success: true, data: JSON.parse(cached), cached: true };
+    } catch (e) {}
+  }
+
   try {
     const reportSheet = ss.getSheetByName(REPORT_SHEET_NAME);
     // Tenta pegar ou criar a aba Alertas
@@ -1270,10 +1279,11 @@ function getAlerts() {
     
     if (!reportSheet) return { success: true, data: [] };
     
-    // 1. Pega dados do Relatório (Timestamp, Patrimonio, Status)
+    // 1. Pega dados do Relatório (Limitado aos últimos 5000 registros para performance)
     const lastRowReport = reportSheet.getLastRow();
-    const reportData = lastRowReport > 1 ? 
-      reportSheet.getRange(2, 1, lastRowReport - 1, 3).getValues() : [];
+    const rowsToRead = Math.min(lastRowReport - 1, 5000);
+    const reportData = rowsToRead > 0 ? 
+      reportSheet.getRange(lastRowReport - rowsToRead + 1, 1, rowsToRead, 3).getValues() : [];
     
     // 2. Pega dados de Alertas já confirmados para não repetir
     const confirmedAlerts = {};
@@ -1379,6 +1389,10 @@ function getAlerts() {
       return null;
     }).filter(Boolean);
 
+    try {
+      cache.put(cacheKey, JSON.stringify(alerts), 30); // Cache por 30 segundos
+    } catch (e) {}
+
     return { success: true, data: alerts };
   } catch (e) {
     return { success: false, error: "Erro ao sincronizar alertas: " + e.message };
@@ -1462,6 +1476,15 @@ function resolveVandalized(patrimonio, motorista) {
 }
 
 function getVandalized() {
+  const cacheKey = 'vandalized_data';
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    try {
+      return { success: true, data: JSON.parse(cached), cached: true };
+    } catch (e) {}
+  }
+
   try {
     const reportSheet = ss.getSheetByName(REPORT_SHEET_NAME);
     const vandalizedSheet = getOrCreateSheet(ss, VANDALIZED_SHEET_NAME,
@@ -1469,10 +1492,11 @@ function getVandalized() {
     
     if (!reportSheet) return { success: true, data: [] };
 
-    // 1. Pega dados do Relatório
+    // 1. Pega dados do Relatório (Limitado aos últimos 5000 registros)
     const lastRowReport = reportSheet.getLastRow();
-    const reportData = lastRowReport > 1 ? 
-      reportSheet.getRange(2, 1, lastRowReport - 1, reportSheet.getLastColumn()).getValues() : [];
+    const rowsToRead = Math.min(lastRowReport - 1, 5000);
+    const reportData = rowsToRead > 0 ? 
+      reportSheet.getRange(lastRowReport - rowsToRead + 1, 1, rowsToRead, reportSheet.getLastColumn()).getValues() : [];
 
     // 2. Pega dados de Vandalizadas já confirmadas para não repetir
     const confirmedVandalized = {};
@@ -1560,6 +1584,10 @@ function getVandalized() {
       }
       return null;
     }).filter(Boolean);
+
+    try {
+      cache.put(cacheKey, JSON.stringify(vandalized), 30); // Cache por 30 segundos
+    } catch (e) {}
 
     return { success: true, data: vandalized };
   } catch (e) {
@@ -2334,6 +2362,15 @@ function getReporData() {
 }
 
 function getChangeStatusData(timeRange = '24h', providedSheets = null) {
+  const cacheKey = 'change_status_data_' + timeRange;
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(cacheKey);
+  if (cached && !providedSheets) {
+    try {
+      return { success: true, data: JSON.parse(cached), cached: true };
+    } catch (e) {}
+  }
+
   try {
     const reportSheet = providedSheets ? providedSheets.report : ss.getSheetByName(REPORT_SHEET_NAME);
     const stationSheet = providedSheets ? providedSheets.stations : ss.getSheetByName(STATIONS_SHEET_NAME);
@@ -2361,24 +2398,31 @@ function getChangeStatusData(timeRange = '24h', providedSheets = null) {
       });
     }
 
-    // 3. Calculate cutoff date
+    // 3. Calculate cutoff date and estimate rows to read
     const now = new Date();
     const cutoffDate = new Date();
+    let rowsToRead = 2000; // Default for 24h
+
     if (timeRange === '48h') {
       cutoffDate.setHours(now.getHours() - 48);
+      rowsToRead = 4000;
     } else if (timeRange === '72h') {
       cutoffDate.setHours(now.getHours() - 72);
+      rowsToRead = 6000;
     } else if (timeRange === 'week') {
       cutoffDate.setDate(now.getDate() - 7);
+      rowsToRead = 10000;
     } else {
       cutoffDate.setHours(now.getHours() - 24);
+      rowsToRead = 2000;
     }
 
-    // 4. Get report data
+    // 4. Get report data (Limited rows)
     const lastRow = reportSheet.getLastRow();
     if (lastRow < 2) return { success: true, data: { vandalizadas: [], filial: [] } };
     
-    const data = reportSheet.getRange(2, 1, lastRow - 1, reportSheet.getLastColumn()).getValues();
+    const actualRowsToRead = Math.min(lastRow - 1, rowsToRead);
+    const data = reportSheet.getRange(lastRow - actualRowsToRead + 1, 1, actualRowsToRead, reportSheet.getLastColumn()).getValues();
     
     // Track the MOST RECENT report for each bike
     const lastReports = {};
@@ -2455,13 +2499,18 @@ function getChangeStatusData(timeRange = '24h', providedSheets = null) {
       }
     });
 
-    return { 
-      success: true, 
-      data: { 
-        vandalizadas: Array.from(vandalizadas).sort((a, b) => parseInt(a) - parseInt(b)), 
-        filial: Array.from(filial).sort((a, b) => parseInt(a) - parseInt(b))
-      } 
+    const result = { 
+      vandalizadas: Array.from(vandalizadas).sort((a, b) => parseInt(a) - parseInt(b)), 
+      filial: Array.from(filial).sort((a, b) => parseInt(a) - parseInt(b))
     };
+
+    if (!providedSheets) {
+      try {
+        cache.put(cacheKey, JSON.stringify(result), 30); // Cache por 30 segundos
+      } catch (e) {}
+    }
+
+    return { success: true, data: result };
   } catch (e) {
     return { success: false, error: "Erro ao buscar dados de status: " + e.message };
   }
