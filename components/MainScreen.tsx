@@ -1226,10 +1226,10 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                     setCollectedBikesDetails(collectedDetails);
                 }
                 
+                // 7. Drivers Summary (Para todos, agora que motoristas também têm resumo)
+                if (d.driversSummary) setDriversSummary(d.driversSummary);
+
                 if (category.includes('ADM')) {
-                    // 7. Drivers Summary
-                    if (d.driversSummary) setDriversSummary(d.driversSummary);
-                    
                     // 8. Alerts
                     if (d.alerts) setAlerts(d.alerts);
                     
@@ -1276,8 +1276,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         refreshAll();
         fetchStations(); // Estações mudam pouco, busca uma vez
 
-        // ATUALIZAÇÃO: Sincronização automática a cada 3 segundos conforme solicitado
-        const interval = setInterval(() => refreshAll(), 3000); 
+        // ATUALIZAÇÃO: Sincronização automática a cada 10 segundos para melhor performance
+        const interval = setInterval(() => refreshAll(), 10000); 
 
         const handleVisibilityChange = () => {
             if (document.visibilityState === 'visible') {

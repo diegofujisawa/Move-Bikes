@@ -616,6 +616,15 @@ function searchBike(bikeNumber) {
 }
 
 function getRequests(driverName, category, providedSheet) {
+    const cacheKey = `requests_${driverName || 'none'}_${category || 'none'}`;
+    const cache = CacheService.getScriptCache();
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      try {
+        return { success: true, data: JSON.parse(cached), cached: true };
+      } catch (e) {}
+    }
+
     const sheet = providedSheet || ss.getSheetByName(REQUESTS_SHEET_NAME);
     if (!sheet) throw new Error(`Planilha "${REQUESTS_SHEET_NAME}" não encontrada.`);
     
@@ -657,6 +666,10 @@ function getRequests(driverName, category, providedSheet) {
             return null;
         }).filter(Boolean);
     }
+
+    try {
+      cache.put(cacheKey, JSON.stringify(requests), 10); // Cache for 10 seconds
+    } catch (e) {}
 
     return { success: true, data: requests };
 }
@@ -2052,58 +2065,76 @@ function getDailyReportData(driverName, timeRange = 'day') {
 function getRouteDetails(driverName, bikeNumbers, providedBikesSheet, providedRequestsSheet) {
   if (!bikeNumbers || bikeNumbers.length === 0) return { success: true, data: {} };
   
-  const bikesSheet = providedBikesSheet || ss.getSheetByName(BIKES_SHEET_NAME);
-  const requestsSheet = providedRequestsSheet || ss.getSheetByName(REQUESTS_SHEET_NAME);
-  
-  if (!bikesSheet || !requestsSheet) throw new Error("Planilhas não encontradas.");
-
-  const bikesData = bikesSheet.getDataRange().getValues();
-  const requestsData = requestsSheet.getDataRange().getValues();
-  
-  const bikeNumberSet = new Set(bikeNumbers.map(String));
-  const result = {};
-
-  // Get current data from BIKES sheet
-  bikesData.forEach((row, idx) => {
-    if (idx === 0) return;
-    const patrimonio = String(row[COLUMN_INDICES.BIKES.PATRIMONIO - 1]).trim();
-    if (bikeNumberSet.has(patrimonio)) {
-      result[patrimonio] = {
-        bikeNumber: patrimonio,
-        currentLat: parseCoordinate(row[COLUMN_INDICES.BIKES.LATITUDE - 1]),
-        currentLng: parseCoordinate(row[COLUMN_INDICES.BIKES.LONGITUDE - 1]),
-        battery: row[COLUMN_INDICES.BIKES.BATERIA - 1],
-        initialLat: null,
-        initialLng: null
-      };
-    }
-  });
-
-  // Get initial data from REQUESTS sheet
-  // We look for the most recent 'Aceita' request for each bike by this driver
-  for (let i = requestsData.length - 1; i >= 1; i--) {
-    const patrimonioRaw = String(requestsData[i][COLUMN_INDICES.REQUESTS.PATRIMONIO - 1]).trim();
-    const acceptedBy = String(requestsData[i][COLUMN_INDICES.REQUESTS.ACEITA_POR - 1]).trim().toLowerCase();
-    const situacao = String(requestsData[i][COLUMN_INDICES.REQUESTS.SITUACAO - 1]).trim().toLowerCase();
-    
-    // Trata casos onde há múltiplas bikes na mesma solicitação (separadas por vírgula)
-    const rowBikes = patrimonioRaw.split(',').map(s => s.trim()).filter(Boolean);
-    
-    rowBikes.forEach(patrimonio => {
-      if (bikeNumberSet.has(patrimonio) && acceptedBy === driverName.toLowerCase() && situacao === 'aceita') {
-        if (result[patrimonio] && result[patrimonio].initialLat === null) {
-          const local = String(requestsData[i][COLUMN_INDICES.REQUESTS.LOCAL - 1]);
-          const coordsMatch = local.match(/(-?\d+[.,]\d+)\s*[,;]\s*(-?\d+[.,]\d+)/);
-          if (coordsMatch) {
-            result[patrimonio].initialLat = parseCoordinate(coordsMatch[1]);
-            result[patrimonio].initialLng = parseCoordinate(coordsMatch[2]);
-          }
-        }
-      }
-    });
+  const sortedBikes = [...bikeNumbers].sort().join(',');
+  const cacheKey = `route_details_${driverName}_${sortedBikes}`;
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    try {
+      return { success: true, data: JSON.parse(cached), cached: true };
+    } catch (e) {}
   }
 
-  return { success: true, data: result };
+  try {
+    const bikesSheet = providedBikesSheet || ss.getSheetByName(BIKES_SHEET_NAME);
+    const requestsSheet = providedRequestsSheet || ss.getSheetByName(REQUESTS_SHEET_NAME);
+    
+    if (!bikesSheet || !requestsSheet) throw new Error("Planilhas não encontradas.");
+
+    const bikesData = bikesSheet.getDataRange().getValues();
+    const lastRowReq = requestsSheet.getLastRow();
+    const numRowsReq = Math.min(lastRowReq - 1, 2000); // Only look at last 2000 requests
+    const requestsData = lastRowReq > 1 ? requestsSheet.getRange(lastRowReq - numRowsReq + 1, 1, numRowsReq, requestsSheet.getLastColumn()).getValues() : [];
+    
+    const bikeNumberSet = new Set(bikeNumbers.map(String));
+    const result = {};
+
+    // Get current data from BIKES sheet
+    bikesData.forEach((row, idx) => {
+      if (idx === 0) return;
+      const patrimonio = String(row[COLUMN_INDICES.BIKES.PATRIMONIO - 1]).trim();
+      if (bikeNumberSet.has(patrimonio)) {
+        result[patrimonio] = {
+          bikeNumber: patrimonio,
+          currentLat: parseCoordinate(row[COLUMN_INDICES.BIKES.LATITUDE - 1]),
+          currentLng: parseCoordinate(row[COLUMN_INDICES.BIKES.LONGITUDE - 1]),
+          battery: row[COLUMN_INDICES.BIKES.BATERIA - 1],
+          initialLat: null,
+          initialLng: null
+        };
+      }
+    });
+
+    // Get initial data from REQUESTS sheet
+    for (let i = requestsData.length - 1; i >= 0; i--) {
+      const patrimonioRaw = String(requestsData[i][COLUMN_INDICES.REQUESTS.PATRIMONIO - 1]).trim();
+      const acceptedBy = String(requestsData[i][COLUMN_INDICES.REQUESTS.ACEITA_POR - 1]).trim().toLowerCase();
+      const situacao = String(requestsData[i][COLUMN_INDICES.REQUESTS.SITUACAO - 1]).trim().toLowerCase();
+      
+      const rowBikes = patrimonioRaw.split(',').map(s => s.trim()).filter(Boolean);
+      
+      rowBikes.forEach(patrimonio => {
+        if (bikeNumberSet.has(patrimonio) && acceptedBy === driverName.toLowerCase() && situacao === 'aceita') {
+          if (result[patrimonio] && result[patrimonio].initialLat === null) {
+            const local = String(requestsData[i][COLUMN_INDICES.REQUESTS.LOCAL - 1]);
+            const coordsMatch = local.match(/(-?\d+[.,]\d+)\s*[,;]\s*(-?\d+[.,]\d+)/);
+            if (coordsMatch) {
+              result[patrimonio].initialLat = parseCoordinate(coordsMatch[1]);
+              result[patrimonio].initialLng = parseCoordinate(coordsMatch[2]);
+            }
+          }
+        }
+      });
+    }
+
+    try {
+      cache.put(cacheKey, JSON.stringify(result), 10); // Cache for 10 seconds
+    } catch (e) {}
+
+    return { success: true, data: result };
+  } catch (error) {
+    return { success: false, error: 'Erro ao buscar detalhes do roteiro: ' + error.message };
+  }
 }
 
 function getSchedule(driverName) {
@@ -2167,6 +2198,15 @@ function getSchedule(driverName) {
 }
 
 function getBikeStatuses(providedStateSheet, providedReportSheet) {
+  const cacheKey = 'bike_statuses';
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    try {
+      return { success: true, data: JSON.parse(cached), cached: true };
+    } catch (e) {}
+  }
+
   try {
     const stateSheet = providedStateSheet || ss.getSheetByName(STATE_SHEET_NAME);
     const reportSheet = providedReportSheet || ss.getSheetByName(REPORT_SHEET_NAME);
@@ -2234,6 +2274,10 @@ function getBikeStatuses(providedStateSheet, providedReportSheet) {
         }
       }
     }
+
+    try {
+      cache.put(cacheKey, JSON.stringify(conflicts), 15); // Cache for 15 seconds
+    } catch (e) {}
 
     return { success: true, data: conflicts };
   } catch (error) {
@@ -2562,6 +2606,17 @@ function updateVehicleKm(plate, kmInicial, kmFinal) {
 }
 
 function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameFilter = null) {
+  const cacheKey = `summary_${timeRange}_${driverNameFilter || 'all'}`;
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    try {
+      return { success: true, data: JSON.parse(cached), cached: true };
+    } catch (e) {
+      // If parsing fails, continue to fetch fresh data
+    }
+  }
+
   try {
     const accessSheet = providedSheets ? providedSheets.access : ss.getSheetByName(ACCESS_SHEET_NAME);
     const reportSheet = providedSheets ? providedSheets.report : ss.getSheetByName(REPORT_SHEET_NAME);
@@ -2593,31 +2648,23 @@ function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameF
     const filterDate = new Date();
     filterDate.setHours(0, 0, 0, 0);
 
+    let rowsToRead = 1000; // Default for 'day'
     if (timeRange === 'week') {
       const day = now.getDay();
       const diff = now.getDate() - day + (day === 0 ? -6 : 1); // Monday
       filterDate.setDate(diff);
+      rowsToRead = 5000;
     } else if (timeRange === 'month') {
       filterDate.setDate(1); // First day of month
-    }
-
-    // 2.5 Get station names for comparison
-    const stationNames = [];
-    if (stationSheet && stationSheet.getLastRow() > 1) {
-      const stationData = stationSheet.getRange(2, COLUMN_INDICES.STATIONS.NAME, stationSheet.getLastRow() - 1, 1).getValues();
-      stationData.forEach(row => {
-        if (row[0]) {
-          const name = row[0].toString().trim().toLowerCase();
-          // Não considerar como estação se o nome contiver "filial"
-          if (!name.includes('filial')) {
-            stationNames.push(name);
-          }
-        }
-      });
+      rowsToRead = 15000;
     }
 
     const lastRowReport = reportSheet.getLastRow();
-    const reportsData = lastRowReport > 1 ? reportSheet.getRange(2, 1, lastRowReport - 1, reportSheet.getLastColumn()).getValues() : [];
+    let reportsData = [];
+    if (lastRowReport > 1) {
+      const numRows = Math.min(lastRowReport - 1, rowsToRead);
+      reportsData = reportSheet.getRange(lastRowReport - numRows + 1, 1, numRows, reportSheet.getLastColumn()).getValues();
+    }
     
     const stats = {};
     drivers.forEach(d => {
@@ -2672,7 +2719,7 @@ function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameF
     // 3. Get real-time state (route and collected)
     const lastRowState = stateSheet.getLastRow();
     const lastColState = stateSheet.getLastColumn();
-    const stateData = stateSheet.getRange(2, 1, lastRowState - 1, lastColState).getValues();
+    const stateData = lastRowState > 1 ? stateSheet.getRange(2, 1, lastRowState - 1, lastColState).getValues() : [];
     const realTime = {};
     stateData.forEach(row => {
       const driver = row[COLUMN_INDICES.STATE.MOTORISTA - 1];
@@ -2687,7 +2734,7 @@ function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameF
     // 4. Get pending requests count
     const lastRowRequests = requestsSheet.getLastRow();
     const lastColRequests = requestsSheet.getLastColumn();
-    const requestsData = requestsSheet.getRange(2, 1, lastRowRequests - 1, lastColRequests).getValues();
+    const requestsData = lastRowRequests > 1 ? requestsSheet.getRange(2, 1, lastRowRequests - 1, lastColRequests).getValues() : [];
     const pendingCounts = {};
     drivers.forEach(d => pendingCounts[d] = 0);
 
@@ -2713,6 +2760,13 @@ function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameF
       realTime: realTime[d] || { route: [], collected: [] },
       pendingRequests: pendingCounts[d]
     }));
+
+    // Cache the result for 30 seconds
+    try {
+      cache.put(cacheKey, JSON.stringify(summary), 30);
+    } catch (e) {
+      // Cache might fail if data is too large (> 100KB)
+    }
 
     return { success: true, data: summary };
   } catch (error) {
