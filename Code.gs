@@ -279,7 +279,7 @@ function handleSync(request) {
     }
     
     if (isAdm) {
-      // 7. Drivers Summary
+      // 7. Drivers Summary (Full for ADM)
       response.data.driversSummary = getDriversSummary(summaryTimeRange, sheets).data || [];
       
       // 8. Alerts
@@ -293,6 +293,9 @@ function handleSync(request) {
       
       // 12. Admin Alerts
       response.data.adminAlerts = getAdminAlerts(driverName).alerts || [];
+    } else {
+      // For regular drivers, we still want their own summary
+      response.data.driversSummary = getDriversSummary(summaryTimeRange, sheets, driverName).data || [];
     }
     
     return response;
@@ -2558,7 +2561,7 @@ function updateVehicleKm(plate, kmInicial, kmFinal) {
   }
 }
 
-function getDriversSummary(timeRange = 'day', providedSheets = null) {
+function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameFilter = null) {
   try {
     const accessSheet = providedSheets ? providedSheets.access : ss.getSheetByName(ACCESS_SHEET_NAME);
     const reportSheet = providedSheets ? providedSheets.report : ss.getSheetByName(REPORT_SHEET_NAME);
@@ -2570,15 +2573,20 @@ function getDriversSummary(timeRange = 'day', providedSheets = null) {
       throw new Error('Uma ou mais planilhas necessárias não foram encontradas.');
     }
 
-    // 1. Get all drivers
-    const lastRowAccess = accessSheet.getLastRow();
-    if (lastRowAccess < 2) return { success: true, data: [] };
-    
-    const lastColAccess = accessSheet.getLastColumn();
-    const driversData = accessSheet.getRange(2, 1, lastRowAccess - 1, lastColAccess).getValues();
-    const drivers = [...new Set(driversData
-      .filter(row => (row[COLUMN_INDICES.ACCESS.CATEGORIA - 1] || '').toString().toUpperCase().includes('MOTORISTA'))
-      .map(row => row[COLUMN_INDICES.ACCESS.USUARIO - 1].toString().trim()))];
+    // 1. Get drivers
+    let drivers = [];
+    if (driverNameFilter) {
+      drivers = [driverNameFilter.toString().trim()];
+    } else {
+      const lastRowAccess = accessSheet.getLastRow();
+      if (lastRowAccess < 2) return { success: true, data: [] };
+      
+      const lastColAccess = accessSheet.getLastColumn();
+      const driversData = accessSheet.getRange(2, 1, lastRowAccess - 1, lastColAccess).getValues();
+      drivers = [...new Set(driversData
+        .filter(row => (row[COLUMN_INDICES.ACCESS.CATEGORIA - 1] || '').toString().toUpperCase().includes('MOTORISTA'))
+        .map(row => row[COLUMN_INDICES.ACCESS.USUARIO - 1].toString().trim()))];
+    }
 
     // 2. Calculate date filter
     const now = new Date();

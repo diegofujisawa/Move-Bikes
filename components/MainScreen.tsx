@@ -284,8 +284,6 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const [useDriversSummaryFallback, setUseDriversSummaryFallback] = useState(false);
 
     const fetchDriversSummary = async () => {
-        if (!category.includes('ADM')) return;
-        
         const currentRange = summaryTimeRange;
         setIsSummaryLoading(true);
         // Se já sabemos que precisamos do fallback, vamos direto para ele
@@ -313,9 +311,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     };
 
     useEffect(() => {
-        if (category.includes('ADM')) {
-            fetchDriversSummary();
-        }
+        fetchDriversSummary();
     }, [summaryTimeRange]);
 
     useEffect(() => {
@@ -327,14 +323,19 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         const currentRange = summaryTimeRange;
         console.warn("Executando fallback manual para resumo dos motoristas...");
         try {
-            const driversResult = await apiCall({ action: 'getMotoristas' });
-            if (!driversResult.success) return;
-            const drivers = driversResult.data;
+            let driversToProcess = [];
+            if (category.includes('ADM')) {
+                const driversResult = await apiCall({ action: 'getMotoristas' });
+                if (!driversResult.success) return;
+                driversToProcess = driversResult.data;
+            } else {
+                driversToProcess = [driverName];
+            }
 
             const requestsResult = await apiCall({ action: 'getRequests', driverName, category });
             const allPending = requestsResult.success ? requestsResult.data : [];
 
-            const summary = await Promise.all(drivers.map(async (d: string) => {
+            const summary = await Promise.all(driversToProcess.map(async (d: string) => {
                 const [stateRes, reportRes] = await Promise.all([
                     apiCall({ action: 'getDriverState', driverName: d }),
                     apiCall({ action: 'getDailyReportData', driverName: d, timeRange: currentRange })
@@ -1543,6 +1544,57 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             </header>
             
             <main>
+                {!category.includes('ADM') && driversSummary.length > 0 && (
+                    <div className="mb-4 p-3 border rounded-lg bg-gray-50 shadow-sm">
+                        <div className="flex justify-between items-center mb-2">
+                            <h2 className="text-sm font-bold text-gray-700 uppercase flex items-center gap-2">
+                                <SheetIcon className="w-4 h-4 text-blue-600" />
+                                Resumo de Atividades
+                            </h2>
+                            <div className="flex bg-white border rounded-md p-0.5 shadow-sm">
+                                {(['day', 'week', 'month'] as const).map((range) => (
+                                    <button
+                                        key={range}
+                                        onClick={() => setSummaryTimeRange(range)}
+                                        className={`px-2 py-0.5 text-[9px] font-bold uppercase rounded transition-colors ${
+                                            summaryTimeRange === range
+                                                ? 'bg-blue-600 text-white'
+                                                : 'text-gray-500 hover:bg-gray-100'
+                                        }`}
+                                    >
+                                        {range === 'day' ? 'Dia' : range === 'week' ? 'Semana' : 'Mês'}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                        
+                        {driversSummary.filter(d => d.name.toLowerCase() === driverName.toLowerCase()).map(driver => (
+                            <div key={driver.name} className="grid grid-cols-5 gap-1.5">
+                                <div className="bg-blue-50 p-1.5 rounded border border-blue-100 text-center">
+                                    <p className="text-[8px] text-blue-600 font-black uppercase leading-tight">Notif.</p>
+                                    <p className="text-sm font-black text-blue-800">{driver.pendingRequests}</p>
+                                </div>
+                                <div className="bg-green-50 p-1.5 rounded border border-green-100 text-center">
+                                    <p className="text-[8px] text-green-600 font-black uppercase leading-tight">Recolh.</p>
+                                    <p className="text-sm font-black text-green-800">{driver.stats.recolhidas}</p>
+                                </div>
+                                <div className="bg-indigo-50 p-1.5 rounded border border-indigo-100 text-center">
+                                    <p className="text-[8px] text-indigo-600 font-black uppercase leading-tight">Remanej.</p>
+                                    <p className="text-sm font-black text-indigo-800">{driver.stats.remanejada}</p>
+                                </div>
+                                <div className="bg-red-50 p-1.5 rounded border border-red-100 text-center">
+                                    <p className="text-[8px] text-red-600 font-black uppercase leading-tight">Não Enc.</p>
+                                    <p className="text-sm font-black text-red-800">{driver.stats.naoEncontrada}</p>
+                                </div>
+                                <div className="bg-orange-50 p-1.5 rounded border border-orange-100 text-center">
+                                    <p className="text-[8px] text-orange-600 font-black uppercase leading-tight">Não Atend.</p>
+                                    <p className="text-sm font-black text-orange-800">{driver.stats.naoAtendida || 0}</p>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
                 {!category.includes('ADM') && (
                     <div className="mb-4 p-3 border rounded-lg bg-gray-50">
                         <h2 className="text-base font-medium text-gray-700 mb-2">Consultar Bicicleta</h2>
