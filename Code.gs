@@ -1705,7 +1705,7 @@ function finalizeRouteBike(request) {
     // O usuário solicitou que a recolha não gere entrada automática no relatório
     if (finalStatus !== 'Recolhida') {
       const rowData = [
-        formatDateTime(new Date()), bikeNumber, finalStatus, finalObservation, driverName,
+        new Date(), bikeNumber, finalStatus, finalObservation, driverName,
         bikeDetails['Status'], bikeDetails['Bateria'], bikeDetails['Trava'], bikeDetails['Localidade']
       ];
       logReport(rowData);
@@ -1739,7 +1739,7 @@ function finalizeCollectedBike(request) {
     
     // 3. Log the report (Ação final: Estação, Filial, etc)
     const rowData = [
-      formatDateTime(new Date()), bikeNumber, finalStatus, finalObservation, driverName,
+      new Date(), bikeNumber, finalStatus, finalObservation, driverName,
       bikeDetails['Status'], bikeDetails['Bateria'], bikeDetails['Trava'], bikeDetails['Localidade']
     ];
     
@@ -1912,7 +1912,30 @@ function getDailyReportData(driverName, timeRange = 'day') {
         const lastColReport = reportSheet.getLastColumn();
         const reportData = reportSheet.getRange(2, 1, lastRowReport - 1, lastColReport).getValues();
         reportData.forEach(row => {
-            const timestamp = new Date(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
+            let timestampRaw = row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1];
+            let timestamp;
+            
+            if (timestampRaw instanceof Date) {
+              timestamp = timestampRaw;
+            } else {
+              // Tenta converter string DD/MM/YYYY para formato que o Date entenda (MM/DD/YYYY)
+              if (typeof timestampRaw === 'string' && timestampRaw.includes('/')) {
+                const parts = timestampRaw.split(' ');
+                const dateParts = parts[0].split('/');
+                if (dateParts.length === 3) {
+                  // Assume DD/MM/YYYY
+                  const isoDate = `${dateParts[2]}-${dateParts[1]}-${dateParts[0]}`;
+                  timestamp = new Date(isoDate + (parts[1] ? 'T' + parts[1] : ''));
+                } else {
+                  timestamp = new Date(timestampRaw);
+                }
+              } else {
+                timestamp = new Date(timestampRaw);
+              }
+            }
+
+            if (isNaN(timestamp.getTime())) return;
+
             const motorista = (row[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
 
             if (motorista.toLowerCase() === driverName.toLowerCase() && timestamp >= filterDate && timestamp <= todayEnd) {
@@ -1943,10 +1966,15 @@ function getDailyReportData(driverName, timeRange = 'day') {
                   report.platesUsed.add(patrimonio);
                 }
 
-                if (statusLower.includes('filial') || statusLower === 'vandalizada') {
-                    report.recolhidas.push(patrimonio);
+                if (statusLower.includes('filial') || statusLower.includes('recolhida') || statusLower === 'vandalizada') {
+                    if (!report.recolhidas.includes(patrimonio)) {
+                        report.recolhidas.push(patrimonio);
+                    }
+                    
                     if (statusLower === 'vandalizada') {
-                        report.vandalizadas.push(patrimonio);
+                        if (!report.vandalizadas.includes(patrimonio)) {
+                            report.vandalizadas.push(patrimonio);
+                        }
                     }
                     
                     // Contabiliza sub-status da Filial baseado na observação
@@ -1961,13 +1989,19 @@ function getDailyReportData(driverName, timeRange = 'day') {
                         report.counts.solicitadoRecolha++;
                     }
                 } else if (statusLower === 'estação' || statusLower === 'estacao') {
-                    report.remanejadas.push(patrimonio);
+                    if (!report.remanejadas.includes(patrimonio)) {
+                        report.remanejadas.push(patrimonio);
+                    }
                     const stationName = (observacao || 'Estação').toString().trim();
                     report.estacoes[stationName] = (report.estacoes[stationName] || 0) + 1;
                 } else if (statusLower === 'não encontrada' || statusLower === 'nao encontrada') {
-                    report.naoEncontrada.push(patrimonio);
+                    if (!report.naoEncontrada.includes(patrimonio)) {
+                        report.naoEncontrada.push(patrimonio);
+                    }
                 } else if (statusLower === 'não atendida' || statusLower === 'nao atendida') {
-                    report.naoAtendida.push(patrimonio);
+                    if (!report.naoAtendida.includes(patrimonio)) {
+                        report.naoAtendida.push(patrimonio);
+                    }
                 }
             }
         });
@@ -2303,7 +2337,26 @@ function getChangeStatusData(timeRange = '24h', providedSheets = null) {
     const lastReports = {};
 
     data.forEach(row => {
-      const timestamp = new Date(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
+      let timestampRaw = row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1];
+      let timestamp;
+      
+      if (timestampRaw instanceof Date) {
+        timestamp = timestampRaw;
+      } else {
+        if (typeof timestampRaw === 'string' && timestampRaw.includes('/')) {
+          const parts = timestampRaw.split(' ');
+          const dateParts = parts[0].split('/');
+          if (dateParts.length === 3) {
+            const isoDate = `${dateParts[2]}-${dateParts[1]}-${dateParts[0]}`;
+            timestamp = new Date(isoDate + (parts[1] ? 'T' + parts[1] : ''));
+          } else {
+            timestamp = new Date(timestampRaw);
+          }
+        } else {
+          timestamp = new Date(timestampRaw);
+        }
+      }
+
       if (isNaN(timestamp.getTime()) || timestamp < cutoffDate) return;
 
       let patrimonio = (row[COLUMN_INDICES.REPORTS.PATRIMONIO - 1] || '').toString().trim().replace(/^0+/, '');
@@ -2348,7 +2401,7 @@ function getChangeStatusData(timeRange = '24h', providedSheets = null) {
         if (currentStatus !== 'Vandalizada' && currentStatus !== 'Manutenção') {
           vandalizadas.add(patrimonio);
         }
-      } else if (lastReport.status.includes('filial')) {
+      } else if (lastReport.status.includes('filial') || lastReport.status.includes('recolhida')) {
         if (currentStatus !== 'Manutenção') {
           filial.add(patrimonio);
         }
@@ -2564,10 +2617,26 @@ function getDriversSummary(timeRange = 'day', providedSheets = null) {
     });
 
     reportsData.forEach(row => {
-      const rowDate = row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1];
-      if (!rowDate) return;
+      let timestampRaw = row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1];
+      let timestamp;
       
-      const timestamp = new Date(rowDate);
+      if (timestampRaw instanceof Date) {
+        timestamp = timestampRaw;
+      } else {
+        if (typeof timestampRaw === 'string' && timestampRaw.includes('/')) {
+          const parts = timestampRaw.split(' ');
+          const dateParts = parts[0].split('/');
+          if (dateParts.length === 3) {
+            const isoDate = `${dateParts[2]}-${dateParts[1]}-${dateParts[0]}`;
+            timestamp = new Date(isoDate + (parts[1] ? 'T' + parts[1] : ''));
+          } else {
+            timestamp = new Date(timestampRaw);
+          }
+        } else {
+          timestamp = new Date(timestampRaw);
+        }
+      }
+
       if (isNaN(timestamp.getTime())) return;
 
       if (timestamp >= filterDate) {
@@ -2579,7 +2648,7 @@ function getDriversSummary(timeRange = 'day', providedSheets = null) {
         const driverKey = Object.keys(stats).find(k => k.toLowerCase() === driver.toLowerCase());
 
         if (driverKey) {
-          if (statusLower.includes('filial') || statusLower === 'vandalizada') {
+          if (statusLower.includes('filial') || statusLower.includes('recolhida') || statusLower === 'vandalizada') {
             stats[driverKey].recolhidas++;
           } else if (statusLower === 'estação' || statusLower === 'estacao') {
             stats[driverKey].remanejada++;

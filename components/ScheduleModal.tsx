@@ -89,18 +89,36 @@ const ScheduleModal: React.FC<ScheduleModalProps> = ({ isOpen, onClose, schedule
                                 const status = schedule[date] || '';
                                 const isFolga = status.toLowerCase().includes('folga');
                                 
+                                // Limpa o texto para exibir apenas o horário se houver prefixos como "Entrada:" ou "Saída:"
+                                let cleanStatus = status
+                                    .replace(/Entrada[:\s]*/gi, '')
+                                    .replace(/Saída[:\s]*/gi, '')
+                                    .replace(/Saida[:\s]*/gi, '')
+                                    .trim();
+                                
+                                // Se o status parecer uma data longa do JS (comum vindo do Sheets/Excel)
+                                // Ex: Sat Dec 30 1899 14:00:00 GMT... - Sat Dec 30 1899 22:00:00 GMT...
+                                if (cleanStatus.includes('1899') || cleanStatus.includes('GMT')) {
+                                    const timeMatches = cleanStatus.match(/(\d{2}:\d{2})/g);
+                                    if (timeMatches && timeMatches.length >= 2) {
+                                        // Pega o primeiro e o último horário encontrado
+                                        cleanStatus = `${timeMatches[0]} às ${timeMatches[timeMatches.length - 1]}`;
+                                    } else if (timeMatches && timeMatches.length === 1) {
+                                        cleanStatus = timeMatches[0];
+                                    }
+                                }
+                                
                                 return (
                                     <div key={date} className="flex justify-between items-center p-4 bg-white hover:bg-blue-50/30 transition-colors">
                                         <div className="flex flex-col">
-                                            <span className="text-sm font-semibold text-gray-900">{date}</span>
-                                            <span className="text-[10px] text-gray-400 uppercase tracking-wider font-medium">Dia Programado</span>
+                                            <span className="text-sm font-bold text-gray-900">{date}</span>
                                         </div>
-                                        <div className={`px-4 py-1.5 rounded-lg text-xs font-bold shadow-sm border ${
+                                        <div className={`px-4 py-2 rounded-xl text-sm font-black shadow-sm border tracking-tighter ${
                                             isFolga 
                                             ? 'bg-emerald-50 text-emerald-700 border-emerald-100' 
                                             : 'bg-blue-50 text-blue-700 border-blue-100'
                                         }`}>
-                                            {status}
+                                            {cleanStatus}
                                         </div>
                                     </div>
                                 );
