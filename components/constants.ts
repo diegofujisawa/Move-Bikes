@@ -1,1 +1,1 @@
-export const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzzCYTbiqUC61KMZk1BPY6RWIARjAqbL0i6XX_R7ldDCBGWUb6SlgADsFiEI7-J2Wnxpw/exec';
+export const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzoVY4j197a6TRtP6Kx2JC2uss4qL9xczE0EsbSRMGSeqr1qiortwoJ7Z0y237Ef_UVzg/exec';

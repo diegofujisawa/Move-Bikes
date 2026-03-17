@@ -843,7 +843,31 @@ function acceptRequest(requestId, driverName) {
     sheet.getRange(row, COLUMN_INDICES.REQUESTS.ACEITA_DATA).setValue(new Date());
     sheet.getRange(row, COLUMN_INDICES.REQUESTS.SITUACAO).setValue('Aceita');
 
-    return { success: true, message: 'Solicitação aceita.' };
+    // NOVO: Atualiza o estado do motorista automaticamente no servidor
+    const patrimonioRaw = (sheet.getRange(row, COLUMN_INDICES.REQUESTS.PATRIMONIO).getValue() || '').toString();
+    const bikesToAdd = patrimonioRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const motivo = (sheet.getRange(row, COLUMN_INDICES.REQUESTS.MOTIVO).getValue() || '').toString().toUpperCase();
+    const isTrailer = motivo.includes('CARRETINHA');
+
+    const stateResult = getDriverState(driverName);
+    let routeBikes = stateResult.success ? stateResult.data.routeBikes : [];
+    let collectedBikes = stateResult.success ? stateResult.data.collectedBikes : [];
+
+    if (isTrailer) {
+      // Se for carretinha, vai direto para recolhidas
+      collectedBikes = [...new Set([...collectedBikes, ...bikesToAdd])];
+      // Remove do roteiro caso estivesse lá por algum motivo
+      routeBikes = routeBikes.filter(b => !bikesToAdd.includes(String(b)));
+    } else {
+      // Se for normal, vai para o roteiro
+      routeBikes = [...new Set([...routeBikes, ...bikesToAdd])];
+      // Remove das recolhidas caso estivesse lá
+      collectedBikes = collectedBikes.filter(b => !bikesToAdd.includes(String(b)));
+    }
+
+    updateDriverState(driverName, routeBikes, collectedBikes);
+
+    return { success: true, message: isTrailer ? 'Carretinha aceita e adicionada às recolhidas.' : 'Solicitação aceita e adicionada ao roteiro.' };
   } finally {
     lock.releaseLock();
   }
@@ -1723,7 +1747,13 @@ function getDriverState(driverName, providedSheet) {
 }
 
 function finalizeRouteBike(request) {
+  const lock = LockService.getScriptLock();
   try {
+    // Tenta obter o lock por até 15 segundos
+    if (!lock.tryLock(15000)) {
+       throw new Error("Não foi possível obter o lock para finalizar a bike. Tente novamente.");
+    }
+    
     const { driverName, bikeNumber, finalStatus, finalObservation } = request;
     
     // 1. Busca o estado atual do servidor para ser a fonte da verdade
@@ -1755,18 +1785,26 @@ function finalizeRouteBike(request) {
       logReport(rowData);
     }
     
-    // 4. Salva o novo estado
+    // 4. Salva o novo estado (updateDriverState já lida com o lock internamente, mas mantemos aqui para proteger o getDriverState acima)
     updateDriverState(driverName, routeBikes, collectedBikes);
     
     return { success: true };
   } catch (error) {
     console.error("Erro em finalizeRouteBike:", error);
     return { success: false, error: error.message };
+  } finally {
+    lock.releaseLock();
   }
 }
 
 function finalizeCollectedBike(request) {
+  const lock = LockService.getScriptLock();
   try {
+    // Tenta obter o lock por até 15 segundos
+    if (!lock.tryLock(15000)) {
+       throw new Error("Não foi possível obter o lock para finalizar a bike recolhida. Tente novamente.");
+    }
+    
     const { driverName, bikeNumber, finalStatus, finalObservation } = request;
     
     // 1. Busca o estado atual do servidor para ser a fonte da verdade
@@ -1794,24 +1832,28 @@ function finalizeCollectedBike(request) {
   } catch (error) {
     console.error("Erro em finalizeCollectedBike:", error);
     return { success: false, error: error.message };
+  } finally {
+    lock.releaseLock();
   }
 }
 
 function updateDriverState(driverName, routeBikes, collectedBikes) {
   const lock = LockService.getScriptLock();
   try {
-    // Tenta obter o lock por até 5 segundos
-    if (!lock.tryLock(5000)) {
-       console.warn("Não foi possível obter o lock para updateDriverState. Continuando sem lock para evitar lentidão extrema.");
+    // Tenta obter o lock por até 15 segundos (aumentado de 5 para maior segurança)
+    if (!lock.tryLock(15000)) {
+       throw new Error("Não foi possível obter o lock para atualizar o estado do motorista. Por favor, tente novamente em instantes.");
     }
     
     const sheet = ss.getSheetByName(STATE_SHEET_NAME);
     if (!sheet) throw new Error(`Planilha "${STATE_SHEET_NAME}" não encontrada.`);
 
     const lastRow = sheet.getLastRow();
+    const lastCol = sheet.getLastColumn() || 4;
+    
     if (lastRow < 2) {
       // Se a planilha estiver vazia, adiciona o primeiro motorista
-      const newRow = new Array(sheet.getLastColumn() || 4).fill('');
+      const newRow = new Array(lastCol).fill('');
       newRow[COLUMN_INDICES.STATE.MOTORISTA - 1] = driverName;
       newRow[COLUMN_INDICES.STATE.ROTEIRO - 1] = Array.isArray(routeBikes) ? routeBikes.join(', ') : '';
       newRow[COLUMN_INDICES.STATE.RECOLHIDAS - 1] = Array.isArray(collectedBikes) ? collectedBikes.join(', ') : '';
@@ -1819,7 +1861,8 @@ function updateDriverState(driverName, routeBikes, collectedBikes) {
       return { success: true };
     }
 
-    const allData = sheet.getDataRange().getValues();
+    const allDataRange = sheet.getRange(1, 1, lastRow, lastCol);
+    const allData = allDataRange.getValues();
     const headers = allData[0];
     const dataRows = allData.slice(1);
     
@@ -1830,41 +1873,48 @@ function updateDriverState(driverName, routeBikes, collectedBikes) {
     const routeString = Array.isArray(routeBikes) ? [...new Set(routeBikes.map(b => String(b).trim()))].filter(Boolean).join(', ') : '';
     const collectedString = Array.isArray(collectedBikes) ? [...new Set(collectedBikes.map(b => String(b).trim()))].filter(Boolean).join(', ') : '';
     const bikesToClean = Array.isArray(collectedBikes) ? collectedBikes.map(b => String(b).trim()).filter(Boolean) : [];
+    const routeBikesToClean = Array.isArray(routeBikes) ? routeBikes.map(b => String(b).trim()).filter(Boolean) : [];
+    const allBikesToClean = [...new Set([...bikesToClean, ...routeBikesToClean])];
 
     let driverFound = false;
     let changed = false;
 
     for (let i = 0; i < dataRows.length; i++) {
       const currentDriver = String(dataRows[i][driverColIdx]).trim();
+      let rowChanged = false;
       
       if (currentDriver.toLowerCase() === String(driverName).trim().toLowerCase()) {
         // Atualiza o motorista atual
-        dataRows[i][routeColIdx] = routeString;
-        dataRows[i][collectedColIdx] = collectedString;
+        if (dataRows[i][routeColIdx] !== routeString || dataRows[i][collectedColIdx] !== collectedString) {
+          dataRows[i][routeColIdx] = routeString;
+          dataRows[i][collectedColIdx] = collectedString;
+          rowChanged = true;
+          changed = true;
+        }
         driverFound = true;
-        changed = true;
-      } else if (bikesToClean.length > 0) {
-        // GARANTIA DE UNICIDADE: Remove as bikes recolhidas de qualquer outro motorista
+      } else if (allBikesToClean.length > 0) {
+        // GARANTIA DE UNICIDADE: Remove as bikes que agora estão com este motorista de qualquer outro motorista
         let otherRoute = String(dataRows[i][routeColIdx] || '').split(',').map(s => s.trim()).filter(Boolean);
         let otherCollected = String(dataRows[i][collectedColIdx] || '').split(',').map(s => s.trim()).filter(Boolean);
         
-        let rowChanged = false;
-        bikesToClean.forEach(bike => {
+        let subRowChanged = false;
+        allBikesToClean.forEach(bike => {
           const rIdx = otherRoute.indexOf(bike);
           if (rIdx !== -1) {
             otherRoute.splice(rIdx, 1);
-            rowChanged = true;
+            subRowChanged = true;
           }
           const cIdx = otherCollected.indexOf(bike);
           if (cIdx !== -1) {
             otherCollected.splice(cIdx, 1);
-            rowChanged = true;
+            subRowChanged = true;
           }
         });
         
-        if (rowChanged) {
+        if (subRowChanged) {
           dataRows[i][routeColIdx] = otherRoute.join(', ');
           dataRows[i][collectedColIdx] = otherCollected.join(', ');
+          rowChanged = true;
           changed = true;
         }
       }
@@ -2696,6 +2746,8 @@ function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameF
     const now = new Date();
     const filterDate = new Date();
     filterDate.setHours(0, 0, 0, 0);
+    let endDate = new Date();
+    endDate.setHours(23, 59, 59, 999);
 
     let rowsToRead = 1000; // Default for 'day'
     if (timeRange === 'week') {
@@ -2706,6 +2758,18 @@ function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameF
     } else if (timeRange === 'month') {
       filterDate.setDate(1); // First day of month
       rowsToRead = 15000;
+    } else if (timeRange === '-1') {
+      // Ontem (dia anterior completo)
+      filterDate.setDate(now.getDate() - 1);
+      endDate.setDate(now.getDate() - 1);
+      rowsToRead = 2000;
+    } else if (timeRange === '-7') {
+      // Semana anterior (segunda a domingo da semana passada)
+      const day = now.getDay();
+      const mondayThisWeek = now.getDate() - day + (day === 0 ? -6 : 1);
+      filterDate.setDate(mondayThisWeek - 7);
+      endDate.setDate(mondayThisWeek - 1);
+      rowsToRead = 10000;
     }
 
     const lastRowReport = reportSheet.getLastRow();
@@ -2743,7 +2807,7 @@ function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameF
 
       if (isNaN(timestamp.getTime())) return;
 
-      if (timestamp >= filterDate) {
+      if (timestamp >= filterDate && timestamp <= endDate) {
         const driver = (row[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
         const status = (row[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim();
         const statusLower = status.toLowerCase();

@@ -123,7 +123,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const [reporData, setReporData] = useState<any[]>([]);
     const [isReporLoading, setIsReporLoading] = useState(false);
     const [driversSummary, setDriversSummary] = useState<any[]>([]);
-    const [summaryTimeRange, setSummaryTimeRange] = useState<'day' | 'week' | 'month'>('day');
+    const [summaryTimeRange, setSummaryTimeRange] = useState<'day' | 'week' | 'month' | '-1' | '-7'>('day');
     const [isSummaryLoading, setIsSummaryLoading] = useState(false);
     const [activeQuadrant, setActiveQuadrant] = useState<'summary' | 'alerts' | 'vandalized' | 'status'>('summary');
     const [alerts, setAlerts] = useState<any[]>([]);
@@ -497,8 +497,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         try {
             const result = await apiCall({ action: 'acceptRequest', requestId, driverName });
             if (result.success) {
-                // Atualiza o estado do roteiro no servidor
-                await apiCall({ action: 'updateDriverState', driverName, routeBikes: newRouteBikes, collectedBikes: newCollectedBikes });
+                // O servidor agora atualiza o estado do motorista automaticamente dentro de acceptRequest
                 alert(isTrailer ? 'Carretinha aceita e adicionada às suas bikes recolhidas!' : 'Solicitação aceita e adicionada ao seu roteiro!');
                 refreshAll(true);
             } else {
@@ -1552,7 +1551,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                 Resumo de Atividades
                             </h2>
                             <div className="flex bg-white border rounded-md p-0.5 shadow-sm">
-                                {(['day', 'week', 'month'] as const).map((range) => (
+                                {(['-1', '-7', 'day', 'week', 'month'] as const).map((range) => (
                                     <button
                                         key={range}
                                         onClick={() => setSummaryTimeRange(range)}
@@ -1562,7 +1561,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                                 : 'text-gray-500 hover:bg-gray-100'
                                         }`}
                                     >
-                                        {range === 'day' ? 'Dia' : range === 'week' ? 'Semana' : 'Mês'}
+                                        {range === '-1' ? '-1' : range === '-7' ? '-7' : range === 'day' ? 'Dia' : range === 'week' ? 'Semana' : 'Mês'}
                                     </button>
                                 ))}
                             </div>
@@ -1831,7 +1830,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                         </div>
                                         <div className="flex justify-end">
                                             <div className="flex bg-white border rounded-md p-0.5 shadow-sm">
-                                                {(['day', 'week', 'month'] as const).map((range) => (
+                                                {(['-1', '-7', 'day', 'week', 'month'] as const).map((range) => (
                                                     <button
                                                         key={range}
                                                         onClick={() => setSummaryTimeRange(range)}
@@ -1841,7 +1840,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                                                 : 'text-gray-500 hover:bg-gray-100'
                                                         }`}
                                                     >
-                                                        {range === 'day' ? 'Dia' : range === 'week' ? 'Semana' : 'Mês'}
+                                                        {range === '-1' ? '-1' : range === '-7' ? '-7' : range === 'day' ? 'Dia' : range === 'week' ? 'Semana' : 'Mês'}
                                                     </button>
                                                 ))}
                                             </div>
