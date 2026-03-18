@@ -164,10 +164,9 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const processingBikesRef = useRef<Set<string>>(new Set());
 
     useEffect(() => {
-        const unsubscribe = syncService.subscribe((queue) => {
-            setPendingActions(queue);
-        });
-        return unsubscribe;
+        // A inscrição no syncService agora não é necessária se não estivermos exibindo a fila na UI
+        // O refreshAll já busca as ações pendentes diretamente do syncService.getPendingActions()
+        return () => {};
     }, []);
 
     const isUpdatingStateRef = useRef(false);
@@ -1196,7 +1195,6 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             setIsSummaryLoading(true);
             setIsAlertsLoading(true);
             setIsVandalizedLoading(true);
-            setIsStatusLoading(true);
         }
         const applyData = (d: any) => {
             // 1. Requests
@@ -1348,7 +1346,6 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 setIsSummaryLoading(false);
                 setIsAlertsLoading(false);
                 setIsVandalizedLoading(false);
-                setIsStatusLoading(false);
             }
         }
     }, [driverName, category, summaryTimeRange, statusTimeRange]);
