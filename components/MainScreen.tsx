@@ -17,7 +17,7 @@ import VehicleSwitchModal from './VehicleSwitchModal';
 import EditDriverModal from './EditDriverModal';
 import AdminAlerts from './AdminAlerts';
 import { apiCall, apiGetCall } from '../api';
-import { syncService, PendingAction } from '../syncService';
+import { syncService } from '../syncService';
 import { User } from '../types';
 
 interface MainScreenProps {
@@ -88,7 +88,6 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const [stations, setStations] = useState<any[]>([]);
     const [bikeConflicts, setBikeConflicts] = useState<Record<string, any>>({});
     const [driverLocations, setDriverLocations] = useState<DriverLocation[]>([]);
-    const [pendingActions, setPendingActions] = useState<PendingAction[]>([]);
 
     const renderConflictIcon = (bike: string) => {
         const conflict = bikeConflicts[bike];
@@ -141,7 +140,6 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const [isTrailerSelectionModalOpen, setIsTrailerSelectionModalOpen] = useState(false);
     const [selectedBikesForTrailer, setSelectedBikesForTrailer] = useState<string[]>([]);
     const [selectedMechanicBike, setSelectedMechanicBike] = useState<any>(null);
-    const [isStatusLoading, setIsStatusLoading] = useState(false);
     const [changeStatusData, setChangeStatusData] = useState<{ vandalizadas: {patrimonio: string, observation: string}[], filial: {patrimonio: string, observation: string}[] }>({ vandalizadas: [], filial: [] });
     const [statusTimeRange, setStatusTimeRange] = useState<'24h' | '48h' | '72h' | 'week'>('24h');
     const [backendVersion, setBackendVersion] = useState<string | null>(null);
@@ -478,11 +476,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         };
     }, []);
 
-    const handleAcceptRequest = async (requestId: number, bikeNumbers: string, reason: string = '') => {
+    const handleAcceptRequest = (requestId: number, bikeNumbers: string, reason: string = '') => {
         if (isLoading) return;
-        const originalPendingRequests = [...pendingRequests];
-        const originalRouteBikes = [...routeBikes];
-        const originalCollectedBikes = [...collectedBikes];
         
         const bikesToAdd = String(bikeNumbers || '').split(',').map(s => s.trim()).filter(Boolean);
         
@@ -499,69 +494,46 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         isUpdatingStateRef.current = true;
         setPendingRequests(prev => prev.filter(r => r.id !== requestId));
         
-        let newRouteBikes = [...routeBikes];
-        let newCollectedBikes = [...collectedBikes];
-
         if (isTrailer) {
             // Se for carretinha, adiciona diretamente às bikes recolhidas e garante que não estejam no roteiro
-            newCollectedBikes = [...new Set([...collectedBikes, ...bikesToAdd])];
-            newRouteBikes = routeBikes.filter(b => !bikesToAdd.includes(String(b)));
-            setCollectedBikes(newCollectedBikes);
-            setRouteBikes(newRouteBikes);
+            setCollectedBikes(prev => [...new Set([...prev, ...bikesToAdd])]);
+            setRouteBikes(prev => prev.filter(b => !bikesToAdd.includes(String(b))));
         } else {
             // Se for roteiro normal, adiciona ao roteiro e garante que não estejam nas recolhidas (caso estivessem)
-            newRouteBikes = [...new Set([...routeBikes, ...bikesToAdd])];
-            newCollectedBikes = collectedBikes.filter(b => !bikesToAdd.includes(String(b)));
-            setRouteBikes(newRouteBikes);
-            setCollectedBikes(newCollectedBikes);
+            setRouteBikes(prev => [...new Set([...prev, ...bikesToAdd])]);
+            setCollectedBikes(prev => prev.filter(b => !bikesToAdd.includes(String(b))));
         }
 
-        setIsLoading(true);
         try {
-            const result = await apiCall({ action: 'acceptRequest', requestId, driverName });
-            if (result.success) {
-                // O servidor agora atualiza o estado do motorista automaticamente dentro de acceptRequest
-                alert(isTrailer ? 'Carretinha aceita e adicionada às suas bikes recolhidas!' : 'Solicitação aceita e adicionada ao seu roteiro!');
-                refreshAll(true);
-            } else {
-                throw new Error(result.error || 'Falha ao aceitar a solicitação.');
-            }
+            const payload = { 
+                action: 'acceptRequest', 
+                requestId, 
+                driverName,
+                bikeNumbers, // Incluído para o filtro de refreshAll
+                isTrailer    // Incluído para o filtro de refreshAll
+            };
+            syncService.queueAction(payload, 'acceptRequest', `Aceitar solicitação ${requestId}`);
         } catch (err: any) {
-            // ROLLBACK em caso de erro
-            setPendingRequests(originalPendingRequests);
-            setRouteBikes(originalRouteBikes);
-            setCollectedBikes(originalCollectedBikes);
             setError(err.message);
         } finally {
-            setIsLoading(false);
             isUpdatingStateRef.current = false;
             lastManualUpdateRef.current = Date.now();
         }
     };
 
-    const handleDeclineRequest = async (requestId: number) => {
+    const handleDeclineRequest = (requestId: number) => {
         if (isLoading) return;
-        const originalPendingRequests = [...pendingRequests];
         
         isUpdatingStateRef.current = true;
         // ATUALIZAÇÃO OTIMISTA: Remove da lista imediatamente
         setPendingRequests(prev => prev.filter(r => r.id !== requestId));
 
-        setIsLoading(true);
         try {
-            const result = await apiCall({ action: 'declineRequest', requestId, driverName });
-            if (result.success) {
-                alert('Solicitação recusada.');
-                refreshAll(true);
-            } else {
-                throw new Error(result.error || 'Falha ao recusar a solicitação.');
-            }
+            const payload = { action: 'declineRequest', requestId, driverName };
+            syncService.queueAction(payload, 'declineRequest', `Recusar solicitação ${requestId}`);
         } catch (err: any) {
-            // ROLLBACK em caso de erro
-            setPendingRequests(originalPendingRequests);
             setError(err.message);
         } finally {
-            setIsLoading(false);
             isUpdatingStateRef.current = false;
             lastManualUpdateRef.current = Date.now();
         }
@@ -760,7 +732,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         }
     };
 
-    const handleStatusUpdate = async (status: string) => {
+    const handleStatusUpdate = (status: string) => {
         if (!searchedBike) return;
         const bikeNumber = String(searchedBike['Patrimônio']);
         
@@ -768,11 +740,6 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         if (processingBikesRef.current.has(bikeNumber)) return;
         processingBikesRef.current.add(bikeNumber);
         
-        const originalSearchedBike = searchedBike;
-        const originalSearchTerm = searchTerm;
-        const originalCollectedBikes = [...collectedBikes];
-        const originalRouteBikes = [...routeBikes];
-
         setProcessingBikes(new Set(processingBikesRef.current));
         isUpdatingStateRef.current = true;
 
@@ -789,12 +756,10 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 setProcessingBikes(new Set(processingBikesRef.current));
                 return;
             }
-            const newCollectedBikes = [...new Set([...collectedBikes, bikeNumber])];
-            const newRouteBikes = routeBikes.filter(b => String(b) !== bikeNumber);
-            setCollectedBikes(newCollectedBikes);
-            setRouteBikes(newRouteBikes);
             
-            setIsLoading(true);
+            setCollectedBikes(prev => [...new Set([...prev, bikeNumber])]);
+            setRouteBikes(prev => prev.filter(b => String(b) !== bikeNumber));
+            
             // Sincroniza e loga no relatório via cache local
             try {
                 const payload = {
@@ -805,18 +770,10 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                     finalObservation: '',
                 };
 
-                await syncService.queueAction(payload, 'finalizeRouteBike', `Recolhida bike ${bikeNumber}`);
-
-                // Força uma atualização após um pequeno delay
-                setTimeout(() => refreshAll(true), 2000);
+                syncService.queueAction(payload, 'finalizeRouteBike', `Recolhida bike ${bikeNumber}`);
             } catch (err: any) {
                 setError(`Erro ao recolher bike ${bikeNumber}: ${err.message}`);
-                setCollectedBikes(originalCollectedBikes);
-                setRouteBikes(originalRouteBikes);
-                setSearchedBike(originalSearchedBike);
-                setSearchTerm(originalSearchTerm);
             } finally {
-                setIsLoading(false);
                 isUpdatingStateRef.current = false;
                 lastManualUpdateRef.current = Date.now();
                 processingBikesRef.current.delete(bikeNumber);
@@ -826,12 +783,10 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             return; 
         }
 
-        setIsLoading(true);
         try {
             // Se o status for "Não encontrada", loga diretamente no relatório e remove do roteiro via cache local
             if (status === 'Não encontrada') {
-                const newRouteBikes = routeBikes.filter(b => String(b) !== bikeNumber);
-                setRouteBikes(newRouteBikes);
+                setRouteBikes(prev => prev.filter(b => String(b) !== bikeNumber));
 
                 const payload = { 
                     action: 'finalizeRouteBike', 
@@ -841,18 +796,11 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                     finalObservation: '',
                 };
 
-                await syncService.queueAction(payload, 'finalizeRouteBike', `Não encontrada bike ${bikeNumber}`);
-
-                // Força uma atualização após um pequeno delay
-                setTimeout(() => refreshAll(true), 2000);
+                syncService.queueAction(payload, 'finalizeRouteBike', `Não encontrada bike ${bikeNumber}`);
             }
         } catch (err: any) {
-            // ROLLBACK em caso de erro
-            setSearchedBike(originalSearchedBike);
-            setSearchTerm(originalSearchTerm);
-            setError(err.message || `Ocorreu um erro ao processar a ação: ${status}`);
+            setError(err.message);
         } finally {
-            setIsLoading(false);
             isUpdatingStateRef.current = false;
             lastManualUpdateRef.current = Date.now();
             processingBikesRef.current.delete(bikeNumber);
@@ -1103,7 +1051,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         }
     };
 
-    const executeCollectedBikeAction = async (bikeNumberInput: string | number, status: string, observation: string) => {
+    const executeCollectedBikeAction = (bikeNumberInput: string | number, status: string, observation: string) => {
         const bikeNumber = String(bikeNumberInput);
         if (processingBikesRef.current.has(bikeNumber)) return;
         
@@ -1119,12 +1067,8 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         processingBikesRef.current.add(bikeNumber);
         setProcessingBikes(new Set(processingBikesRef.current));
         
-        // Salva o estado original para rollback
-        const originalCollectedBikes = [...collectedBikes];
-
         // ATUALIZAÇÃO OTIMISTA: Remove a bike da lista na UI imediatamente
-        const newCollectedBikes = collectedBikes.filter(b => String(b) !== bikeNumber);
-        setCollectedBikes(newCollectedBikes);
+        setCollectedBikes(prev => prev.filter(b => String(b) !== bikeNumber));
 
         try {
             let finalStatus = status;
@@ -1149,14 +1093,9 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 finalObservation,
             };
 
-            await syncService.queueAction(payload, 'finalizeCollectedBike', `${status} bike ${bikeNumber}`);
-
-            // Força uma atualização após um pequeno delay
-            setTimeout(() => refreshAll(true), 2000);
-
+            syncService.queueAction(payload, 'finalizeCollectedBike', `${status} bike ${bikeNumber}`);
         } catch (err: any) {
             setError(`Erro ao processar bike ${bikeNumber}: ${err.message}`);
-            setCollectedBikes(originalCollectedBikes);
         } finally {
             isUpdatingStateRef.current = false;
             lastManualUpdateRef.current = Date.now();
@@ -1245,7 +1184,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 setStations(normalizedStations);
             }
         } catch (err: any) {
-            console.error('Erro ao buscar estações:', err.message);
+            console.error('Erro ao buscar estações:', err);
         }
     };
 
@@ -1264,17 +1203,57 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             if (d.requests) setPendingRequests(d.requests);
             
             // 2. Driver State
-            if (d.driverState && !isUpdatingStateRef.current && (Date.now() - lastManualUpdateRef.current > 10000)) {
+            if (d.driverState && !isUpdatingStateRef.current) {
+                const pendingActions = syncService.getPendingActions();
+                
+                // Bikes sendo removidas do roteiro
+                const pendingRouteRemovals = new Set(
+                    pendingActions
+                        .filter(a => a.actionName === 'finalizeRouteBike')
+                        .map(a => String(a.payload.bikeNumber))
+                );
+
+                // Bikes sendo adicionadas ao roteiro (de acceptRequest se não for carretinha)
+                const pendingRouteAdditions = new Set<string>();
+                pendingActions
+                    .filter(a => a.actionName === 'acceptRequest' && !a.payload.isTrailer)
+                    .forEach(a => {
+                        const bikes = String(a.payload.bikeNumbers || '').split(',').map(s => s.trim()).filter(Boolean);
+                        bikes.forEach(b => pendingRouteAdditions.add(b));
+                    });
+
+                // Bikes sendo removidas da posse
+                const pendingCollectedRemovals = new Set(
+                    pendingActions
+                        .filter(a => a.actionName === 'finalizeCollectedBike')
+                        .map(a => String(a.payload.bikeNumber))
+                );
+
+                // Bikes sendo adicionadas à posse (de acceptRequest se carretinha, ou finalizeRouteBike se status for Recolhida)
+                const pendingCollectedAdditions = new Set<string>();
+                pendingActions
+                    .filter(a => a.actionName === 'acceptRequest' && a.payload.isTrailer)
+                    .forEach(a => {
+                        const bikes = String(a.payload.bikeNumbers || '').split(',').map(s => s.trim()).filter(Boolean);
+                        bikes.forEach(b => pendingCollectedAdditions.add(b));
+                    });
+                
+                pendingActions
+                    .filter(a => a.actionName === 'finalizeRouteBike' && a.payload.finalStatus === 'Recolhida')
+                    .forEach(a => pendingCollectedAdditions.add(String(a.payload.bikeNumber)));
+
                 const serverCollected = [...new Set((d.driverState.collectedBikes || []).map(b => String(b)))];
-                // GARANTIA DE UNICIDADE: Se está recolhida, não pode estar no roteiro
                 const serverRoute = [...new Set((d.driverState.routeBikes || []).map(b => String(b)))].filter(b => !serverCollected.includes(b));
                 
-                // FILTRAGEM ADICIONAL: Remove bikes que ainda estão em processamento local
-                const filteredRoute = serverRoute.filter(b => !processingBikesRef.current.has(b));
-                const filteredCollected = serverCollected.filter(b => !processingBikesRef.current.has(b));
+                // Aplica lógica de pendentes aos dados do servidor
+                const finalRoute = serverRoute.filter(b => !pendingRouteRemovals.has(b) && !processingBikesRef.current.has(b));
+                pendingRouteAdditions.forEach(b => { if (!finalRoute.includes(b)) finalRoute.push(b); });
 
-                setRouteBikes(filteredRoute);
-                setCollectedBikes(filteredCollected);
+                const finalCollected = serverCollected.filter(b => !pendingCollectedRemovals.has(b) && !processingBikesRef.current.has(b));
+                pendingCollectedAdditions.forEach(b => { if (!finalCollected.includes(b)) finalCollected.push(b); });
+
+                setRouteBikes(finalRoute);
+                setCollectedBikes(finalCollected);
             }
             
             // 3. Bike Statuses (Conflicts)

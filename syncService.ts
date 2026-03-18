@@ -58,7 +58,7 @@ class SyncService {
    * @param actionName Nome técnico da ação
    * @param description Descrição amigável para o usuário
    */
-  public async queueAction(payload: any, actionName: string, description: string) {
+  public queueAction(payload: any, actionName: string, description: string) {
     const action: PendingAction = {
       id: Math.random().toString(36).substring(2, 15) + Date.now(),
       payload,
