@@ -1,10 +1,13 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { BicycleData, PickupRequest, DriverLocation } from '../types';
-import { LogoutIcon, PlusIcon, PlusPlusIcon, MapIcon, SheetIcon, SearchIcon, AlertIcon, CalendarIcon, CarIcon, XIcon, BicycleIcon, MovingIcon, UserIcon, AlertTriangleIcon, QrCodeIcon, TrailerIcon, SwitchIcon } from './icons';
+import { LogoutIcon, PlusIcon, PlusPlusIcon, MapIcon, SheetIcon, SearchIcon, AlertIcon, CalendarIcon, CarIcon, XIcon, BicycleIcon, MovingIcon, UserIcon, AlertTriangleIcon, QrCodeIcon, TrailerIcon, SwitchIcon, RefreshIcon } from './icons';
 import { Html5Qrcode } from 'html5-qrcode';
 import ScheduleModal from './ScheduleModal';
 import ReporModal from './ReporModal';
+import MechanicRepairModal from './MechanicRepairModal';
+import MechanicSelectionModal from './MechanicSelectionModal';
+import TrailerSelectionModal from './TrailerSelectionModal';
 import RequestModal from './RequestModal';
 import ReportModal from './ReportModal';
 import RouteModal from './RouteModal';
@@ -14,6 +17,7 @@ import VehicleSwitchModal from './VehicleSwitchModal';
 import EditDriverModal from './EditDriverModal';
 import AdminAlerts from './AdminAlerts';
 import { apiCall, apiGetCall } from '../api';
+import { syncService, PendingAction } from '../syncService';
 import { User } from '../types';
 
 interface MainScreenProps {
@@ -84,6 +88,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const [stations, setStations] = useState<any[]>([]);
     const [bikeConflicts, setBikeConflicts] = useState<Record<string, any>>({});
     const [driverLocations, setDriverLocations] = useState<DriverLocation[]>([]);
+    const [pendingActions, setPendingActions] = useState<PendingAction[]>([]);
 
     const renderConflictIcon = (bike: string) => {
         const conflict = bikeConflicts[bike];
@@ -130,8 +135,14 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const [isAlertsLoading, setIsAlertsLoading] = useState(false);
     const [vandalizedBikes, setVandalizedBikes] = useState<any[]>([]);
     const [isVandalizedLoading, setIsVandalizedLoading] = useState(false);
+    const [mechanicsList, setMechanicsList] = useState<any[]>([]);
+    const [isMechanicRepairModalOpen, setIsMechanicRepairModalOpen] = useState(false);
+    const [isMechanicSelectionModalOpen, setIsMechanicSelectionModalOpen] = useState(false);
+    const [isTrailerSelectionModalOpen, setIsTrailerSelectionModalOpen] = useState(false);
+    const [selectedBikesForTrailer, setSelectedBikesForTrailer] = useState<string[]>([]);
+    const [selectedMechanicBike, setSelectedMechanicBike] = useState<any>(null);
     const [isStatusLoading, setIsStatusLoading] = useState(false);
-    const [changeStatusData, setChangeStatusData] = useState<{ vandalizadas: string[], filial: string[] }>({ vandalizadas: [], filial: [] });
+    const [changeStatusData, setChangeStatusData] = useState<{ vandalizadas: {patrimonio: string, observation: string}[], filial: {patrimonio: string, observation: string}[] }>({ vandalizadas: [], filial: [] });
     const [statusTimeRange, setStatusTimeRange] = useState<'24h' | '48h' | '72h' | 'week'>('24h');
     const [backendVersion, setBackendVersion] = useState<string | null>(null);
     const [userSchedule, setUserSchedule] = useState<Record<string, string>>({});
@@ -145,10 +156,22 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
     const [isEditDriverModalOpen, setIsEditDriverModalOpen] = useState(false);
     const [editingDriver, setEditingDriver] = useState<any>(null);
+
+    const normalizedCategory = category.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, "");
+    const isAdm = normalizedCategory.includes('ADM');
+    const isMecanica = normalizedCategory.includes('MECANICA') || normalizedCategory.includes('MECANICO');
     const [requestsHistory, setRequestsHistory] = useState<any[]>([]);
     const [isHistoryLoading, setIsHistoryLoading] = useState(false);
     const [processingBikes, setProcessingBikes] = useState<Set<string>>(new Set());
     const processingBikesRef = useRef<Set<string>>(new Set());
+
+    useEffect(() => {
+        const unsubscribe = syncService.subscribe((queue) => {
+            setPendingActions(queue);
+        });
+        return unsubscribe;
+    }, []);
+
     const isUpdatingStateRef = useRef(false);
     const lastManualUpdateRef = useRef<number>(0);
     const lastLocationUpdateRef = useRef<number>(0);
@@ -548,21 +571,19 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         setIsLoading(true);
         setError(null);
         try {
-            const result = await apiCall({
+            const payload = {
                 action: 'createRequest',
                 patrimonio: details.bikeNumber,
                 ocorrencia: details.reason,
                 local: details.location,
                 recipient: details.recipient
-            });
+            };
 
-            if (result.success) {
-                alert('Solicitação enviada com sucesso!');
-                setRequestModalOpen(false);
-                refreshAll(true);
-            } else {
-                throw new Error(result.error || 'Falha ao criar a solicitação.');
-            }
+            await syncService.queueAction(payload, 'createRequest', `Solicitação bike ${details.bikeNumber}`);
+
+            alert('Solicitação salva localmente e sendo enviada!');
+            setRequestModalOpen(false);
+            refreshAll(true);
         } catch (err: any) {
             setError(err.message);
         } finally {
@@ -655,6 +676,90 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         });
     };
 
+    const handleConfirmMechanicsReceipt = async (bikeNumber: string) => {
+        setSelectedMechanicBike({ patrimonio: bikeNumber });
+        setIsMechanicSelectionModalOpen(true);
+    };
+
+    const handleMechanicSelectionConfirm = async (mechanicName: string) => {
+        setIsLoading(true);
+        try {
+            const payload = { 
+                action: 'confirmMechanicsReceipt', 
+                bikeNumber: selectedMechanicBike.patrimonio, 
+                mechanicName: mechanicName 
+            };
+
+            await syncService.queueAction(payload, 'confirmMechanicsReceipt', `Recebimento bike ${selectedMechanicBike.patrimonio}`);
+
+            alert('Recebimento salvo localmente!');
+            setIsMechanicSelectionModalOpen(false);
+            refreshAll(true);
+        } catch (err: any) {
+            alert('Erro ao confirmar recebimento: ' + err.message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleFinalizeMechanicsRepair = async (treatment: string) => {
+        if (!treatment) {
+            alert('Por favor, descreva a tratativa realizada.');
+            return;
+        }
+        setIsLoading(true);
+        try {
+            const payload = { 
+                action: 'finalizeMechanicsRepair', 
+                bikeNumber: selectedMechanicBike.patrimonio, 
+                mechanicName: driverName,
+                treatment: treatment
+            };
+
+            await syncService.queueAction(payload, 'finalizeMechanicsRepair', `Reparo bike ${selectedMechanicBike.patrimonio}`);
+
+            alert('Reparo salvo localmente!');
+            setIsMechanicRepairModalOpen(false);
+            refreshAll(true);
+        } catch (err: any) {
+            alert('Erro ao finalizar reparo: ' + err.message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleOrganizeTrailer = async (bikeNumbers: string[], trailerName: string) => {
+        if (!trailerName) {
+            alert('Por favor, informe o nome/número da carretinha.');
+            return;
+        }
+        setIsLoading(true);
+        try {
+            const payload = { action: 'organizeTrailer', bikeNumbers, trailerName };
+            await syncService.queueAction(payload, 'organizeTrailer', `Organizar ${trailerName}`);
+            alert('Organização salva localmente!');
+            refreshAll(true);
+        } catch (err: any) {
+            alert('Erro ao organizar carretinha: ' + err.message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleFinalizeTrailer = async (trailerName: string) => {
+        setIsLoading(true);
+        try {
+            const payload = { action: 'finalizeTrailer', trailerName };
+            await syncService.queueAction(payload, 'finalizeTrailer', `Finalizar ${trailerName}`);
+            alert('Finalização salva localmente!');
+            refreshAll(true);
+        } catch (err: any) {
+            alert('Erro ao finalizar carretinha: ' + err.message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
     const handleStatusUpdate = async (status: string) => {
         if (!searchedBike) return;
         const bikeNumber = String(searchedBike['Patrimônio']);
@@ -690,20 +795,19 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             setRouteBikes(newRouteBikes);
             
             setIsLoading(true);
-            // Sincroniza e loga no relatório
+            // Sincroniza e loga no relatório via cache local
             try {
-                const result = await apiCall({
+                const payload = {
                     action: 'finalizeRouteBike',
                     driverName,
                     bikeNumber,
                     finalStatus: 'Recolhida',
-                    finalObservation: '', // Removido: 'Recolhida via busca/scanner' a pedido do usuário
-                });
+                    finalObservation: '',
+                };
 
-                if (!result.success) {
-                    throw new Error(result.error || 'Falha ao sincronizar estado.');
-                }
-                // Força uma atualização após um pequeno delay para garantir que o servidor processou
+                await syncService.queueAction(payload, 'finalizeRouteBike', `Recolhida bike ${bikeNumber}`);
+
+                // Força uma atualização após um pequeno delay
                 setTimeout(() => refreshAll(true), 2000);
             } catch (err: any) {
                 setError(`Erro ao recolher bike ${bikeNumber}: ${err.message}`);
@@ -724,22 +828,21 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
 
         setIsLoading(true);
         try {
-            // Se o status for "Não encontrada", loga diretamente no relatório e remove do roteiro.
+            // Se o status for "Não encontrada", loga diretamente no relatório e remove do roteiro via cache local
             if (status === 'Não encontrada') {
                 const newRouteBikes = routeBikes.filter(b => String(b) !== bikeNumber);
                 setRouteBikes(newRouteBikes);
 
-                const reportResult = await apiCall({ 
+                const payload = { 
                     action: 'finalizeRouteBike', 
                     driverName, 
                     bikeNumber, 
                     finalStatus: 'Não encontrada', 
                     finalObservation: '',
-                });
+                };
 
-                if (!reportResult.success) {
-                    throw new Error(reportResult.error || 'Falha ao registrar "Não encontrada".');
-                }
+                await syncService.queueAction(payload, 'finalizeRouteBike', `Não encontrada bike ${bikeNumber}`);
+
                 // Força uma atualização após um pequeno delay
                 setTimeout(() => refreshAll(true), 2000);
             }
@@ -1031,27 +1134,25 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 finalStatus = 'Estação'; 
                 finalObservation = observation; 
             } else if (status === 'Enviada para Filial') {
-                finalStatus = 'Recolhida';
+                finalStatus = 'Filial';
                 finalObservation = observation; 
             } else if (status === 'Vandalizada') {
                 finalStatus = 'Vandalizada';
                 finalObservation = observation; 
             }
 
-            const result = await apiCall({ 
+            const payload = { 
                 action: 'finalizeCollectedBike', 
                 driverName, 
                 bikeNumber, 
                 finalStatus, 
                 finalObservation,
-            });
+            };
 
-            if (result.success) {
-                // Força uma atualização após um pequeno delay
-                setTimeout(() => refreshAll(true), 2000);
-            } else {
-                throw new Error(result.error || `Falha ao registrar "${status}".`);
-            }
+            await syncService.queueAction(payload, 'finalizeCollectedBike', `${status} bike ${bikeNumber}`);
+
+            // Força uma atualização após um pequeno delay
+            setTimeout(() => refreshAll(true), 2000);
 
         } catch (err: any) {
             setError(`Erro ao processar bike ${bikeNumber}: ${err.message}`);
@@ -1158,6 +1259,82 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             setIsVandalizedLoading(true);
             setIsStatusLoading(true);
         }
+        const applyData = (d: any) => {
+            // 1. Requests
+            if (d.requests) setPendingRequests(d.requests);
+            
+            // 2. Driver State
+            if (d.driverState && !isUpdatingStateRef.current && (Date.now() - lastManualUpdateRef.current > 10000)) {
+                const serverCollected = [...new Set((d.driverState.collectedBikes || []).map(b => String(b)))];
+                // GARANTIA DE UNICIDADE: Se está recolhida, não pode estar no roteiro
+                const serverRoute = [...new Set((d.driverState.routeBikes || []).map(b => String(b)))].filter(b => !serverCollected.includes(b));
+                
+                // FILTRAGEM ADICIONAL: Remove bikes que ainda estão em processamento local
+                const filteredRoute = serverRoute.filter(b => !processingBikesRef.current.has(b));
+                const filteredCollected = serverCollected.filter(b => !processingBikesRef.current.has(b));
+
+                setRouteBikes(filteredRoute);
+                setCollectedBikes(filteredCollected);
+            }
+            
+            // 3. Bike Statuses (Conflicts)
+            if (d.bikeStatuses) setBikeConflicts(d.bikeStatuses);
+            
+            // 4. Schedule
+            if (d.schedule) setUserSchedule(d.schedule);
+            
+            // 5. Motoristas
+            if (d.motoristas) setMotoristas(d.motoristas);
+            
+            // 6. Driver Locations
+            if (d.driverLocations) setDriverLocations(d.driverLocations);
+            
+            // 11. Bike Details (Route and Collected)
+            if (d.bikeDetails) {
+                const details = d.bikeDetails;
+                const routeDetails: Record<string, any> = {};
+                const collectedDetails: Record<string, any> = {};
+                
+                (d.driverState?.routeBikes || []).forEach((b: string) => {
+                    if (details[b]) routeDetails[b] = details[b];
+                });
+                (d.driverState?.collectedBikes || []).forEach((b: string) => {
+                    if (details[b]) collectedDetails[b] = details[b];
+                });
+                
+                setRouteBikesDetails(prev => {
+                    const next = { ...routeDetails };
+                    Object.keys(next).forEach(id => {
+                        if (prev[id] && prev[id].initialLat !== null) {
+                            next[id].initialLat = prev[id].initialLat;
+                            next[id].initialLng = prev[id].initialLng;
+                        }
+                    });
+                    return next;
+                });
+                setCollectedBikesDetails(collectedDetails);
+            }
+            
+            // 7. Drivers Summary
+            if (d.driversSummary) setDriversSummary(d.driversSummary);
+
+            // Mechanics List
+            if (d.mechanicsList) setMechanicsList(d.mechanicsList);
+
+            if (isAdm) {
+                if (d.alerts) setAlerts(d.alerts);
+                if (d.vandalized) setVandalizedBikes(d.vandalized);
+                if (d.changeStatusData) setChangeStatusData(d.changeStatusData);
+                if (d.adminAlerts) {
+                    const newCount = d.adminAlerts.length;
+                    setAlertCount(newCount);
+                    if (newCount > lastViewedAlertCount) {
+                        setHasNewAlerts(true);
+                    }
+                }
+            }
+        };
+
         try {
             const result = await apiCall({ 
                 action: 'sync', 
@@ -1165,100 +1342,26 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 category, 
                 summaryTimeRange, 
                 statusTimeRange 
-            }, 2); // Aumentado para 2 retries para maior resiliência
+            }, 2);
 
             if (result.success && result.data) {
-                const d = result.data;
-                
-                // 1. Requests
-                if (d.requests) setPendingRequests(d.requests);
-                
-                // 2. Driver State
-                if (d.driverState && !isUpdatingStateRef.current && (Date.now() - lastManualUpdateRef.current > 10000)) {
-                    const serverCollected = [...new Set((d.driverState.collectedBikes || []).map(b => String(b)))];
-                    // GARANTIA DE UNICIDADE: Se está recolhida, não pode estar no roteiro
-                    const serverRoute = [...new Set((d.driverState.routeBikes || []).map(b => String(b)))].filter(b => !serverCollected.includes(b));
-                    
-                    // FILTRAGEM ADICIONAL: Remove bikes que ainda estão em processamento local
-                    const filteredRoute = serverRoute.filter(b => !processingBikesRef.current.has(b));
-                    const filteredCollected = serverCollected.filter(b => !processingBikesRef.current.has(b));
-
-                    setRouteBikes(filteredRoute);
-                    setCollectedBikes(filteredCollected);
-                }
-                
-                // 3. Bike Statuses (Conflicts)
-                if (d.bikeStatuses) setBikeConflicts(d.bikeStatuses);
-                
-                // 4. Schedule
-                if (d.schedule) setUserSchedule(d.schedule);
-                
-                // 5. Motoristas
-                if (d.motoristas) setMotoristas(d.motoristas);
-                
-                // 6. Driver Locations
-                if (d.driverLocations) setDriverLocations(d.driverLocations);
-                
-                // 11. Bike Details (Route and Collected)
-                if (d.bikeDetails) {
-                    const details = d.bikeDetails;
-                    const routeDetails: Record<string, any> = {};
-                    const collectedDetails: Record<string, any> = {};
-                    
-                    (d.driverState?.routeBikes || []).forEach((b: string) => {
-                        if (details[b]) routeDetails[b] = details[b];
-                    });
-                    (d.driverState?.collectedBikes || []).forEach((b: string) => {
-                        if (details[b]) collectedDetails[b] = details[b];
-                    });
-                    
-                    setRouteBikesDetails(prev => {
-                        const next = { ...routeDetails };
-                        Object.keys(next).forEach(id => {
-                            if (prev[id] && prev[id].initialLat !== null) {
-                                next[id].initialLat = prev[id].initialLat;
-                                next[id].initialLng = prev[id].initialLng;
-                            }
-                        });
-                        return next;
-                    });
-                    setCollectedBikesDetails(collectedDetails);
-                }
-                
-                // 7. Drivers Summary (Para todos, agora que motoristas também têm resumo)
-                if (d.driversSummary) setDriversSummary(d.driversSummary);
-
-                if (category.includes('ADM')) {
-                    // 8. Alerts
-                    if (d.alerts) setAlerts(d.alerts);
-                    
-                    // 9. Vandalized
-                    if (d.vandalized) setVandalizedBikes(d.vandalized);
-                    
-                    // 10. Change Status Data
-                    if (d.changeStatusData) setChangeStatusData(d.changeStatusData);
-
-                    // 12. Admin Alerts
-                    if (d.adminAlerts) {
-                        const newCount = d.adminAlerts.length;
-                        setAlertCount(newCount);
-                        if (newCount > lastViewedAlertCount) {
-                            setHasNewAlerts(true);
-                        }
-                    }
-                }
-
+                applyData(result.data);
+                localStorage.setItem('cached_main_data', JSON.stringify(result.data));
                 if (result.version) setBackendVersion(result.version);
                 setLastSyncTime(new Date().toLocaleTimeString());
             } else {
                 setError(result.error || 'Falha na sincronização de dados.');
             }
         } catch (err: any) {
-            console.error("Erro na atualização automática:", err);
-            // Se o erro for "Ação desconhecida", o backend ainda não foi atualizado
-            if (err.message && err.message.includes('Ação desconhecida')) {
-                console.warn("Backend não suporta 'sync'. Usando modo legado.");
-                // Fallback para o modo antigo se necessário (opcional, mas bom para transição)
+            console.error("Erro ao atualizar dados:", err);
+            const cached = localStorage.getItem('cached_main_data');
+            if (cached) {
+                try {
+                    applyData(JSON.parse(cached));
+                    console.log("Dados carregados do cache local.");
+                } catch (e) {
+                    console.error("Erro ao parsear cache:", e);
+                }
             }
         } finally {
             setIsSyncing(false);
@@ -1270,6 +1373,32 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             }
         }
     }, [driverName, category, summaryTimeRange, statusTimeRange]);
+
+    useEffect(() => {
+        const cached = localStorage.getItem('cached_main_data');
+        if (cached) {
+            try {
+                const d = JSON.parse(cached);
+                if (d.requests) setPendingRequests(d.requests);
+                if (d.driverState) {
+                    setRouteBikes(d.driverState.routeBikes || []);
+                    setCollectedBikes(d.driverState.collectedBikes || []);
+                }
+                if (d.bikeStatuses) setBikeConflicts(d.bikeStatuses);
+                if (d.schedule) setUserSchedule(d.schedule);
+                if (d.motoristas) setMotoristas(d.motoristas);
+                if (d.driverLocations) setDriverLocations(d.driverLocations);
+                if (d.mechanicsList) setMechanicsList(d.mechanicsList);
+                if (d.driversSummary) setDriversSummary(d.driversSummary);
+                if (d.alerts) setAlerts(d.alerts);
+                if (d.vandalized) setVandalizedBikes(d.vandalized);
+                if (d.changeStatusData) setChangeStatusData(d.changeStatusData);
+                console.log("Cache inicial carregado.");
+            } catch (e) {
+                console.error("Erro ao carregar cache inicial:", e);
+            }
+        }
+    }, []);
 
     useEffect(() => {
         refreshAll();
@@ -1467,53 +1596,65 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                     </div>
                 </div>
                 <div className="flex items-center flex-wrap gap-1 mt-4 sm:mt-0">
-                    <button onClick={() => setRequestModalOpen(true)} disabled={isLoading} title="Nova Solicitação" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
-                        <PlusIcon className="w-6 h-6 sm:w-7 sm:h-7"/>
-                    </button>
-                    <button onClick={() => setRouteModalOpen(true)} disabled={isLoading} title="Criar Roteiro" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
-                        <PlusPlusIcon className="w-6 h-6 sm:w-7 sm:h-7" />
-                    </button>
-                    <button onClick={() => setTrailerModalOpen(true)} disabled={isLoading} title="Carretinha" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
-                        <TrailerIcon className="w-6 h-6 sm:w-7 sm:h-7" />
-                    </button>
-                    <button 
-                        onClick={() => {
-                            setIsAdminAlertsOpen(true);
-                            setHasNewAlerts(false);
-                            setAlertCount(0);
-                            setLastViewedAlertCount(alertCount);
-                        }} 
-                        disabled={isLoading} 
-                        title="Alertas de Divergência" 
-                        className={`p-1.5 sm:p-2 rounded-full transition-colors relative disabled:opacity-50 ${
-                            hasNewAlerts && alertCount > 0 
-                                ? 'text-red-600 bg-red-50 animate-pulse' 
-                                : 'text-gray-500 hover:bg-gray-100 hover:text-red-600'
-                        }`}
-                    >
-                        <AlertTriangleIcon className={`w-6 h-6 sm:w-7 sm:h-7 ${hasNewAlerts && alertCount > 0 ? 'animate-bounce' : ''}`}/>
-                        {alertCount > 0 && (
-                            <span className="absolute top-0 right-0 bg-red-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full border-2 border-white">
-                                {alertCount}
-                            </span>
-                        )}
-                    </button>
-                             {category.includes('ADM') && (
+                    {!isMecanica && (
+                        <>
+                            <button onClick={() => setRequestModalOpen(true)} disabled={isLoading} title="Nova Solicitação" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
+                                <PlusIcon className="w-6 h-6 sm:w-7 sm:h-7"/>
+                            </button>
+                            <button onClick={() => setRouteModalOpen(true)} disabled={isLoading} title="Criar Roteiro" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
+                                <PlusPlusIcon className="w-6 h-6 sm:w-7 sm:h-7" />
+                            </button>
+                            <button onClick={() => setTrailerModalOpen(true)} disabled={isLoading} title="Carretinha" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
+                                <TrailerIcon className="w-6 h-6 sm:w-7 sm:h-7" />
+                            </button>
+                            <button 
+                                onClick={() => {
+                                    setIsAdminAlertsOpen(true);
+                                    setHasNewAlerts(false);
+                                    setAlertCount(0);
+                                    setLastViewedAlertCount(alertCount);
+                                }} 
+                                disabled={isLoading} 
+                                title="Alertas de Divergência" 
+                                className={`p-1.5 sm:p-2 rounded-full transition-colors relative disabled:opacity-50 ${
+                                    hasNewAlerts && alertCount > 0 
+                                        ? 'text-red-600 bg-red-50 animate-pulse' 
+                                        : 'text-gray-500 hover:bg-gray-100 hover:text-red-600'
+                                }`}
+                            >
+                                <AlertTriangleIcon className={`w-6 h-6 sm:w-7 sm:h-7 ${hasNewAlerts && alertCount > 0 ? 'animate-bounce' : ''}`}/>
+                                {alertCount > 0 && (
+                                    <span className="absolute top-0 right-0 bg-red-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full border-2 border-white">
+                                        {alertCount}
+                                    </span>
+                                )}
+                            </button>
+                            {isMecanica && (
+                                <button 
+                                    onClick={() => handleSyncData()} 
+                                    disabled={isSyncing} 
+                                    title="Sincronizar Dados" 
+                                    className={`p-1.5 sm:p-2 rounded-full transition-colors disabled:opacity-50 ${isSyncing ? 'text-blue-600 animate-spin' : 'text-gray-500 hover:bg-gray-100 hover:text-blue-600'}`}
+                                >
+                                    <RefreshIcon className="w-6 h-6 sm:w-7 sm:h-7"/>
+                                </button>
+                            )}
+                            {isAdm && (
                                 <button onClick={onShowMap} disabled={isLoading} title="Ver Mapa em Tempo Real" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
                                     <MapIcon className="w-6 h-6 sm:w-7 sm:h-7"/>
                                 </button>
                             )}
-                            {category.toUpperCase() === 'MOTORISTA' && (
+                            {category.toUpperCase().includes('MOTORISTA') && (
                                 <button onClick={() => setIsVehicleModalOpen(true)} disabled={isLoading} title="Trocar Veículo" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
                                     <SwitchIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                                 </button>
                             )}
-                            {category.toUpperCase() === 'MOTORISTA' && (
+                            {category.toUpperCase().includes('MOTORISTA') && (
                                 <button onClick={() => { fetchSchedule(); setIsScheduleModalOpen(true); }} disabled={isLoading} title="Minha Escala" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
                                     <CalendarIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                                 </button>
                             )}
-                            {!category.includes('ADM') && (
+                            {!isAdm && (
                                 <button 
                                     onClick={() => window.open('https://docs.google.com/forms/d/e/1FAIpQLSdYtWC_KKixt9gWwZG_Q6hyaD2QCvv-_ilOfhtUVJiF5EevSQ/viewform', '_blank')} 
                                     disabled={isLoading}
@@ -1523,19 +1664,21 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                     <CarIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                                 </button>
                             )}
-                     {!category.includes('ADM') && (
-                        <button onClick={() => setReportModalOpen(true)} disabled={isLoading} title="Gerar Relatório" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
-                            <SheetIcon className="w-6 h-6 sm:w-7 sm:h-7" />
-                        </button>
-                     )}
-                    <button 
-                        onClick={() => { fetchReporData(); setIsReporModalOpen(true); }}
-                        disabled={isLoading}
-                        className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50"
-                        title="Estações Livres"
-                    >
-                        <BicycleIcon className="w-6 h-6 sm:w-7 sm:h-7" />
-                    </button>
+                            {!isAdm && (
+                                <button onClick={() => setReportModalOpen(true)} disabled={isLoading} title="Gerar Relatório" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
+                                    <SheetIcon className="w-6 h-6 sm:w-7 sm:h-7" />
+                                </button>
+                            )}
+                            <button 
+                                onClick={() => { fetchReporData(); setIsReporModalOpen(true); }}
+                                disabled={isLoading}
+                                className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50"
+                                title="Estações Livres"
+                            >
+                                <BicycleIcon className="w-6 h-6 sm:w-7 sm:h-7" />
+                            </button>
+                        </>
+                    )}
                     <button onClick={onLogout} disabled={isLoading} title="Sair" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-red-600 transition-colors disabled:opacity-50">
                         <LogoutIcon className="w-6 h-6 sm:w-7 sm:h-7" />
                     </button>
@@ -1543,7 +1686,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             </header>
             
             <main>
-                {!category.includes('ADM') && driversSummary.length > 0 && (
+                {!isAdm && !isMecanica && driversSummary.length > 0 && (
                     <div className="mb-4 p-3 border rounded-lg bg-gray-50 shadow-sm">
                         <div className="flex justify-between items-center mb-2">
                             <h2 className="text-sm font-bold text-gray-700 uppercase flex items-center gap-2">
@@ -1772,6 +1915,149 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                         <p className="text-sm text-gray-500">Nenhuma notificação pendente no momento.</p>
                     )}
                 </div>
+
+                {isMecanica && (
+                    <div className="mt-6 space-y-6">
+                        {/* 1. Filial - Aguardando Confirmação */}
+                        <div className="p-4 border rounded-lg bg-blue-50 shadow-sm">
+                            <h2 className="text-lg font-bold text-blue-800 mb-3 flex items-center gap-2">
+                                <CarIcon className="w-5 h-5" />
+                                Filial - Aguardando Confirmação
+                            </h2>
+                            {mechanicsList.filter(b => b.status === 'Aguardando Confirmação').length > 0 ? (
+                                <div className="space-y-2">
+                                    {mechanicsList.filter(b => b.status === 'Aguardando Confirmação').map(bike => (
+                                        <div key={bike.patrimonio} className="flex justify-between items-center p-3 bg-white border rounded-md shadow-sm">
+                                            <div className="flex flex-col">
+                                                <span className="font-bold text-gray-700">Bike: {bike.patrimonio}</span>
+                                                {bike.bateria !== undefined && (
+                                                    <span className="text-[10px] text-gray-600">
+                                                        Bateria: {bike.bateria}% | {(['SIM', 'YES', 'TRUE', 'CARREGANDO'].includes(String(bike.carregamento).toUpperCase())) ? 'Carregando' : 'Não carregando'}
+                                                    </span>
+                                                )}
+                                                {bike.mecanico && (
+                                                    <span className="text-[10px] font-bold text-blue-600">
+                                                        Mecânico: {bike.mecanico}
+                                                    </span>
+                                                )}
+                                                {bike.tratativa && <span className="text-[10px] text-gray-500 italic">Obs: {bike.tratativa}</span>}
+                                            </div>
+                                            <button 
+                                                onClick={() => handleConfirmMechanicsReceipt(bike.patrimonio)}
+                                                className="px-3 py-1 bg-blue-600 text-white text-xs font-bold rounded hover:bg-blue-700 transition-colors shadow-sm active:scale-95"
+                                            >
+                                                Confirmar Recebimento
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <p className="text-sm text-gray-500 italic">Nenhuma bike aguardando confirmação.</p>
+                            )}
+                        </div>
+
+                        {/* 2. Mecânica - Em Manutenção */}
+                        <div className="p-4 border rounded-lg bg-orange-50 shadow-sm">
+                            <h2 className="text-lg font-bold text-orange-800 mb-3 flex items-center gap-2">
+                                <BicycleIcon className="w-5 h-5" />
+                                Mecânica - Em Manutenção
+                            </h2>
+                            {mechanicsList.filter(b => b.status === 'Em Manutenção').length > 0 ? (
+                                <div className="space-y-2">
+                                    {mechanicsList.filter(b => b.status === 'Em Manutenção').map(bike => (
+                                        <div key={bike.patrimonio} className="flex justify-between items-center p-3 bg-white border rounded-md shadow-sm">
+                                            <div>
+                                                <p className="font-bold text-gray-700">Bike: {bike.patrimonio}</p>
+                                                {bike.bateria !== undefined && (
+                                                    <p className="text-[10px] text-gray-600">
+                                                        Bateria: {bike.bateria}% | {(['SIM', 'YES', 'TRUE', 'CARREGANDO'].includes(String(bike.carregamento).toUpperCase())) ? 'Carregando' : 'Não carregando'}
+                                                    </p>
+                                                )}
+                                                {bike.mecanico && (
+                                                    <p className="text-[10px] font-bold text-blue-600">
+                                                        Mecânico: {bike.mecanico}
+                                                    </p>
+                                                )}
+                                                <p className="text-[10px] text-gray-500">Entrada: {new Date(bike.dataEntrada).toLocaleString()}</p>
+                                            </div>
+                                            <button 
+                                                onClick={() => { setSelectedMechanicBike(bike); setIsMechanicRepairModalOpen(true); }}
+                                                className="px-3 py-1 bg-orange-600 text-white text-xs font-bold rounded hover:bg-orange-700 transition-colors shadow-sm active:scale-95"
+                                            >
+                                                Finalizar Reparo
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <p className="text-sm text-gray-500 italic">Nenhuma bike em manutenção.</p>
+                            )}
+                        </div>
+
+                        {/* 3. Reserva - Prontas */}
+                        <div className="p-4 border rounded-lg bg-green-50 shadow-sm">
+                            <h2 className="text-lg font-bold text-green-800 mb-3 flex items-center gap-2">
+                                <TrailerIcon className="w-5 h-5" />
+                                Reserva - Prontas para Remanejamento
+                            </h2>
+                            {mechanicsList.filter(b => b.status === 'Reserva').length > 0 ? (
+                                <div className="space-y-4">
+                                    {/* Agrupamento por Carretinha */}
+                                    {Object.entries(
+                                        mechanicsList.filter(b => b.status === 'Reserva').reduce((acc, bike) => {
+                                            const key = bike.carretinha || 'Sem Carretinha';
+                                            if (!acc[key]) acc[key] = [];
+                                            acc[key].push(bike);
+                                            return acc;
+                                        }, {} as Record<string, any[]>)
+                                    ).map(([trailer, bikes]) => (
+                                        <div key={trailer} className="border border-green-200 rounded-md bg-white p-3 shadow-sm">
+                                            <div className="flex justify-between items-center mb-2 border-b pb-1">
+                                                <h3 className="font-bold text-green-700 flex items-center gap-2">
+                                                    <TrailerIcon className="w-4 h-4" />
+                                                    {trailer}
+                                                </h3>
+                                                {trailer !== 'Sem Carretinha' && (
+                                                    <button 
+                                                        onClick={() => handleFinalizeTrailer(trailer)}
+                                                        className="text-[10px] bg-green-600 text-white px-2 py-0.5 rounded font-bold hover:bg-green-700 active:scale-95 transition-all"
+                                                    >
+                                                        Finalizar Carretinha
+                                                    </button>
+                                                )}
+                                            </div>
+                                            <div className="grid grid-cols-3 gap-2">
+                                                {bikes.map(bike => (
+                                                    <div key={bike.patrimonio} className="text-xs p-1 bg-gray-50 border rounded text-center font-medium text-gray-700 flex flex-col items-center">
+                                                        <span>{bike.patrimonio}</span>
+                                                        {bike.bateria !== undefined && (
+                                                            <span className="text-[8px] text-gray-500 font-normal">
+                                                                {bike.bateria}% {(['SIM', 'YES', 'TRUE', 'CARREGANDO'].includes(String(bike.carregamento).toUpperCase())) ? '⚡' : ''}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            {trailer === 'Sem Carretinha' && (
+                                                <button 
+                                                    onClick={() => {
+                                                        setSelectedBikesForTrailer(bikes.map(b => b.patrimonio));
+                                                        setIsTrailerSelectionModalOpen(true);
+                                                    }}
+                                                    className="mt-3 w-full py-1.5 bg-blue-600 text-white text-[10px] font-bold rounded hover:bg-blue-700 active:scale-95 transition-all"
+                                                >
+                                                    Organizar em Carretinha
+                                                </button>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <p className="text-sm text-gray-500 italic">Nenhuma bike na reserva.</p>
+                            )}
+                        </div>
+                    </div>
+                )}
 
                 {category.includes('ADM') && (
                     <div className="mt-6 overflow-hidden">
@@ -2053,7 +2339,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                         <div className="flex items-center gap-2">
                                             <BicycleIcon className="w-5 h-5 text-blue-600" />
                                             <h3 className="text-lg font-bold text-gray-800">Alterar Status</h3>
-                                            {isStatusLoading && <span className="text-[10px] text-blue-500 animate-pulse">Sincronizando...</span>}
+                                            {/* Sincronização silenciosa */}
                                         </div>
                                         
                                         <div className="flex items-center gap-2 bg-white p-1 rounded-lg border shadow-sm">
@@ -2077,7 +2363,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                             <div className="flex justify-between items-center mb-2">
                                                 <h4 className="text-sm font-bold text-orange-700 uppercase tracking-wider">Vandalizadas</h4>
                                                 <button 
-                                                    onClick={() => copyToClipboard(changeStatusData.vandalizadas)}
+                                                    onClick={() => copyToClipboard(changeStatusData.vandalizadas.map(v => v.patrimonio))}
                                                     className="px-2 py-1 bg-gray-100 text-gray-600 text-[10px] font-bold rounded hover:bg-gray-200 transition-colors flex items-center gap-1"
                                                 >
                                                     <SheetIcon className="w-3 h-3" /> Copiar Lista
@@ -2086,7 +2372,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                             <div className="max-h-[200px] overflow-y-auto bg-gray-50 rounded p-2 border border-dashed">
                                                 {changeStatusData.vandalizadas.length > 0 ? (
                                                     <p className="text-xs font-mono break-all text-gray-600 leading-relaxed">
-                                                        {changeStatusData.vandalizadas.join(',')}
+                                                        {changeStatusData.vandalizadas.map(v => v.patrimonio).join(',')}
                                                     </p>
                                                 ) : (
                                                     <p className="text-xs text-gray-400 italic text-center py-4">Nenhuma bike vandalizada.</p>
@@ -2099,7 +2385,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                              <div className="flex justify-between items-center mb-2">
                                                  <h4 className="text-sm font-bold text-blue-700 uppercase tracking-wider">Filial</h4>
                                                  <button 
-                                                     onClick={() => copyToClipboard(changeStatusData.filial)}
+                                                     onClick={() => copyToClipboard(changeStatusData.filial.map(v => v.patrimonio))}
                                                      className="px-2 py-1 bg-gray-100 text-gray-600 text-[10px] font-bold rounded hover:bg-gray-200 transition-colors flex items-center gap-1"
                                                  >
                                                      <SheetIcon className="w-3 h-3" /> Copiar Lista
@@ -2108,7 +2394,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                                              <div className="max-h-[200px] overflow-y-auto bg-gray-50 rounded p-2 border border-dashed">
                                                  {changeStatusData.filial.length > 0 ? (
                                                      <p className="text-xs font-mono break-all text-gray-600 leading-relaxed">
-                                                        {changeStatusData.filial.join(',')}
+                                                        {changeStatusData.filial.map(v => v.patrimonio).join(',')}
                                                      </p>
                                                  ) : (
                                                      <p className="text-xs text-gray-400 italic text-center py-4">Nenhuma bike na filial.</p>
@@ -2122,7 +2408,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                     </div>
                 )}
 
-                {!category.includes('ADM') && (
+                {!category.includes('ADM') && category.toUpperCase() !== 'MECANICA' && (
                     <div className="mt-6 p-4 border rounded-lg bg-gray-50">
                         <div className="flex justify-between items-center mb-3">
                             <h2 className="text-lg font-semibold text-gray-700">Roteiro de Recolhas</h2>
@@ -2206,7 +2492,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                     </div>
                 )}
 
-                {!category.includes('ADM') && (
+                {!category.includes('ADM') && category.toUpperCase() !== 'MECANICA' && (
                     <div className="mt-6 p-4 border rounded-lg bg-gray-50">
                         <h2 className="text-lg font-semibold text-gray-700 mb-3">Bikes Recolhidas</h2>
                         {sortedCollectedBikes.length > 0 ? (
@@ -2333,6 +2619,35 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 data={reporData}
                 isLoading={isReporLoading}
             />
+
+            <MechanicRepairModal
+                isOpen={isMechanicRepairModalOpen}
+                onClose={() => setIsMechanicRepairModalOpen(false)}
+                onConfirm={handleFinalizeMechanicsRepair}
+                isLoading={isLoading}
+                bikeNumber={selectedMechanicBike?.patrimonio || ''}
+            />
+
+            <MechanicSelectionModal
+                isOpen={isMechanicSelectionModalOpen}
+                onClose={() => setIsMechanicSelectionModalOpen(false)}
+                onConfirm={handleMechanicSelectionConfirm}
+                isLoading={isLoading}
+                bikeNumber={selectedMechanicBike?.patrimonio || ''}
+            />
+
+            <TrailerSelectionModal
+                isOpen={isTrailerSelectionModalOpen}
+                onClose={() => setIsTrailerSelectionModalOpen(false)}
+                onConfirm={(trailerName) => {
+                    handleOrganizeTrailer(selectedBikesForTrailer, trailerName);
+                    setIsTrailerSelectionModalOpen(false);
+                }}
+                isLoading={isLoading}
+                bikeNumbers={selectedBikesForTrailer}
+            />
+
+            {/* Botão de sincronização removido para ser silencioso */}
         </div>
     );
 };

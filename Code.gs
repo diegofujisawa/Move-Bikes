@@ -22,6 +22,8 @@ const VANDALISMO_SHEET_NAME = 'Vandalismo';
 const DIVERGENCE_SHEET_NAME = 'Divergencia';
 const NOTIFICATIONS_SHEET_NAME = 'Notificacoes';
 const DAILY_SUMMARY_SHEET_NAME = 'ResumoDiario';
+const MECHANICS_SHEET_NAME = 'Mecanica';
+const QUEUE_SHEET_NAME = 'FilaProcessamento';
 
 // --- MAPA DE COLUNAS FIXAS (BASEADO NAS IMAGENS E DIRETRIZES) ---
 // As colunas são 1-based (A=1, B=2, etc.) para uso com `getRange`.
@@ -62,6 +64,9 @@ const COLUMN_INDICES = {
     TIMESTAMP: 1, PATRIMONIO: 2, OCORRENCIA: 3, LOCAL: 4,
     ACEITA_POR: 5, ACEITA_DATA: 6, SITUACAO: 7, DESTINATARIO: 8,
     RECUSADA_POR: 9
+  },
+  MECHANICS: {
+    PATRIMONIO: 1, STATUS: 2, DATA_ENTRADA: 3, MECANICO: 4, TRATATIVA: 5, DATA_FINALIZACAO: 6, CARRETINHA: 7
   },
 };
 
@@ -168,11 +173,30 @@ function formatDateTime(date) {
 
 // --- ROTEADOR PRINCIPAL DE REQUISIÇÕES ---
 function doPost(e) {
-  let response = { success: false, error: 'Ação não processada.', version: BACKEND_VERSION };
-  let request;
+  const lock = LockService.getScriptLock();
+  let lockAcquired = false;
+  
   try {
+    // Tenta obter o lock por até 30 segundos para garantir processamento sequencial
+    lockAcquired = lock.tryLock(30000);
+    
+    if (!lockAcquired) {
+      return ContentService.createTextOutput(JSON.stringify({ 
+        success: false, 
+        error: 'Servidor ocupado processando outras requisições. Por favor, tente novamente em instantes.', 
+        version: BACKEND_VERSION,
+        retryable: true
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    let response = { success: false, error: 'Ação não processada.', version: BACKEND_VERSION };
+    let request;
+    
     request = JSON.parse(e.postData.contents);
     const action = (request.action || '').toString().trim();
+    
+    // Log da operação na fila (opcional, para auditoria)
+    logOperationToQueue(action, request);
     
     switch (action) {
       case 'getDriversSummary': response = { ...getDriversSummary(request.timeRange), version: BACKEND_VERSION }; break;
@@ -213,16 +237,64 @@ function doPost(e) {
       case 'saveDailySummary': response = { ...saveDailySummary(request.summaryData), version: BACKEND_VERSION }; break;
       case 'getAdminAlerts': response = { ...getAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
       case 'clearAdminAlerts': response = { ...clearAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
+      case 'getMechanicsList': response = { ...getMechanicsList(), version: BACKEND_VERSION }; break;
+      case 'confirmMechanicsReceipt': response = { ...confirmMechanicsReceipt(request.bikeNumber, request.mechanicName), version: BACKEND_VERSION }; break;
+      case 'finalizeMechanicsRepair': response = { ...finalizeMechanicsRepair(request.bikeNumber, request.mechanicName, request.treatment), version: BACKEND_VERSION }; break;
+      case 'organizeTrailer': response = { ...organizeTrailer(request.bikeNumbers, request.trailerName), version: BACKEND_VERSION }; break;
+      case 'finalizeTrailer': response = { ...finalizeTrailer(request.trailerName), version: BACKEND_VERSION }; break;
       default: response = { success: false, error: 'Ação desconhecida: ' + action, version: BACKEND_VERSION }; break;
     }
+    
+    return ContentService
+      .createTextOutput(JSON.stringify(response))
+      .setMimeType(ContentService.MimeType.JSON);
+
   } catch (error) {
     Logger.log('ERRO FATAL no doPost. Payload: ' + (e.postData ? e.postData.contents : 'N/A') + '. Erro: ' + error.message + ' Stack: ' + error.stack);
-    response = { success: false, error: 'Erro crítico no servidor: ' + error.message, version: BACKEND_VERSION };
+    return ContentService
+      .createTextOutput(JSON.stringify({ success: false, error: 'Erro crítico no servidor: ' + error.message, version: BACKEND_VERSION }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    if (lockAcquired) {
+      lock.releaseLock();
+    }
   }
-  
-  return ContentService
-    .createTextOutput(JSON.stringify(response))
-    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * Registra a operação em uma aba de fila para auditoria e controle.
+ */
+function logOperationToQueue(action, payload) {
+  try {
+    const writeActions = [
+      'login', 'logout', 'createRequest', 'acceptRequest', 'declineRequest', 
+      'logReport', 'updateBikeAssignment', 'clearDriverRoute', 'updateLocation', 
+      'updateDriverState', 'finalizeCollectedBike', 'finalizeRouteBike', 
+      'confirmBikeFound', 'confirmVandalizedFound', 'switchVehicle', 
+      'saveDailySummary', 'clearAdminAlerts', 'confirmMechanicsReceipt', 
+      'finalizeMechanicsRepair', 'organizeTrailer', 'finalizeTrailer'
+    ];
+
+    if (!writeActions.includes(action)) return;
+
+    let sheet = ss.getSheetByName(QUEUE_SHEET_NAME);
+    if (!sheet) {
+      sheet = ss.insertSheet(QUEUE_SHEET_NAME);
+      sheet.appendRow(['Data/Hora', 'Ação', 'Usuário', 'Payload']);
+      sheet.setFrozenRows(1);
+    }
+
+    const userName = payload.userName || payload.driverName || payload.login || 'Sistema';
+    sheet.appendRow([new Date(), action, userName, JSON.stringify(payload)]);
+    
+    // Limpeza automática: mantém apenas os últimos 2000 registros
+    const lastRow = sheet.getLastRow();
+    if (lastRow > 2000) {
+      sheet.deleteRows(2, lastRow - 2000);
+    }
+  } catch (e) {
+    console.error("Erro ao logar na fila:", e);
+  }
 }
 
 
@@ -234,7 +306,9 @@ function doPost(e) {
  */
 function handleSync(request) {
   const { driverName, category, summaryTimeRange, statusTimeRange } = request;
-  const isAdm = category && category.toUpperCase().includes('ADM');
+  const catUpper = (category || '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, "");
+  const isAdm = catUpper.includes('ADM');
+  const isMecanica = catUpper.includes('MECANICA') || catUpper.includes('MECANICO');
   
   const response = { success: true, data: {} };
   
@@ -246,7 +320,8 @@ function handleSync(request) {
       report: ss.getSheetByName(REPORT_SHEET_NAME),
       access: ss.getSheetByName(ACCESS_SHEET_NAME),
       bikes: ss.getSheetByName(BIKES_SHEET_NAME),
-      stations: ss.getSheetByName(STATIONS_SHEET_NAME)
+      stations: ss.getSheetByName(STATIONS_SHEET_NAME),
+      mechanics: ss.getSheetByName(MECHANICS_SHEET_NAME)
     };
     
     // 1. Requests (Solicitações Pendentes)
@@ -296,6 +371,10 @@ function handleSync(request) {
     } else {
       // For regular drivers, we still want their own summary
       response.data.driversSummary = getDriversSummary(summaryTimeRange, sheets, driverName).data || [];
+    }
+
+    if (isMecanica) {
+      response.data.mechanicsList = getMechanicsList().data || [];
     }
     
     return response;
@@ -686,6 +765,7 @@ function getRequestsHistory(driverName, category) {
         const lastCol = sheet.getLastColumn();
         const data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
         const isAdm = category && category.toUpperCase().includes('ADM');
+    const isMecanica = category && category.toUpperCase().includes('MECANICA');
 
         history = data.map((row, index) => {
             const patrimonio = row[COLUMN_INDICES.REQUESTS.PATRIMONIO - 1] || '';
@@ -846,7 +926,7 @@ function acceptRequest(requestId, driverName) {
     // NOVO: Atualiza o estado do motorista automaticamente no servidor
     const patrimonioRaw = (sheet.getRange(row, COLUMN_INDICES.REQUESTS.PATRIMONIO).getValue() || '').toString();
     const bikesToAdd = patrimonioRaw.split(',').map(s => s.trim()).filter(Boolean);
-    const motivo = (sheet.getRange(row, COLUMN_INDICES.REQUESTS.MOTIVO).getValue() || '').toString().toUpperCase();
+    const motivo = (sheet.getRange(row, COLUMN_INDICES.REQUESTS.OCORRENCIA).getValue() || '').toString().toUpperCase();
     const isTrailer = motivo.includes('CARRETINHA');
 
     const stateResult = getDriverState(driverName);
@@ -1775,8 +1855,15 @@ function finalizeRouteBike(request) {
       }
     }
     
-    // 3. SÓ LOGA NO RELATÓRIO SE NÃO FOR RECOLHIDA
-    // O usuário solicitou que a recolha não gere entrada automática no relatório
+    // 3. LOGA NO RELATÓRIO E ADICIONA À MECÂNICA SE NECESSÁRIO
+    const statusLower = finalStatus.toLowerCase();
+    
+    // Se for Recolhida, Vandalizada ou Filial, adiciona ao fluxo da Mecânica
+    if (statusLower.includes('recolhida') || statusLower.includes('vandalizada') || statusLower.includes('filial')) {
+      addToMechanics(bikeNumber);
+    }
+
+    // Loga no relatório apenas se NÃO for 'Recolhida' (para evitar duplicidade, logamos apenas no finalizador)
     if (finalStatus !== 'Recolhida') {
       const rowData = [
         new Date(), bikeNumber, finalStatus, finalObservation, driverName,
@@ -1785,7 +1872,7 @@ function finalizeRouteBike(request) {
       logReport(rowData);
     }
     
-    // 4. Salva o novo estado (updateDriverState já lida com o lock internamente, mas mantemos aqui para proteger o getDriverState acima)
+    // 4. Salva o novo estado
     updateDriverState(driverName, routeBikes, collectedBikes);
     
     return { success: true };
@@ -1820,12 +1907,25 @@ function finalizeCollectedBike(request) {
     collectedBikes = collectedBikes.filter(b => String(b).trim() !== String(bikeNumber).trim());
     
     // 3. Log the report (Ação final: Estação, Filial, etc)
+    let reportStatus = finalStatus;
+    // Se for Filial, o usuário quer que registre como 'Recolhida' na coluna C
+    if (finalStatus === 'Filial') {
+      reportStatus = 'Recolhida';
+    }
+
     const rowData = [
-      new Date(), bikeNumber, finalStatus, finalObservation, driverName,
+      new Date(), bikeNumber, reportStatus, finalObservation, driverName,
       bikeDetails['Status'], bikeDetails['Bateria'], bikeDetails['Trava'], bikeDetails['Localidade']
     ];
     
     logReport(rowData);
+
+    // NOVO: Se for para a Filial, Vandalizada ou Recolhida, adiciona ao fluxo da Mecânica
+    const statusLower = finalStatus.toLowerCase();
+    if (statusLower.includes('filial') || statusLower.includes('vandalizada') || statusLower.includes('recolhida')) {
+      addToMechanics(bikeNumber);
+    }
+
     updateDriverState(driverName, routeBikes, collectedBikes);
     
     return { success: true };
@@ -2451,20 +2551,20 @@ function getChangeStatusData(timeRange = '24h', providedSheets = null) {
     // 3. Calculate cutoff date and estimate rows to read
     const now = new Date();
     const cutoffDate = new Date();
-    let rowsToRead = 2000; // Default for 24h
+    let rowsToRead = 10000; 
 
     if (timeRange === '48h') {
-      cutoffDate.setHours(now.getHours() - 48);
-      rowsToRead = 4000;
+      cutoffDate.setDate(now.getDate() - 15);
+      rowsToRead = 30000;
     } else if (timeRange === '72h') {
-      cutoffDate.setHours(now.getHours() - 72);
-      rowsToRead = 6000;
+      cutoffDate.setDate(now.getDate() - 30);
+      rowsToRead = 60000;
     } else if (timeRange === 'week') {
-      cutoffDate.setDate(now.getDate() - 7);
-      rowsToRead = 10000;
+      cutoffDate.setDate(now.getDate() - 180);
+      rowsToRead = 200000;
     } else {
-      cutoffDate.setHours(now.getHours() - 24);
-      rowsToRead = 2000;
+      cutoffDate.setDate(now.getDate() - 7);
+      rowsToRead = 20000;
     }
 
     // 4. Get report data (Limited rows)
@@ -2501,57 +2601,83 @@ function getChangeStatusData(timeRange = '24h', providedSheets = null) {
       if (isNaN(timestamp.getTime()) || timestamp < cutoffDate) return;
 
       let patrimonio = (row[COLUMN_INDICES.REPORTS.PATRIMONIO - 1] || '').toString().trim().replace(/^0+/, '');
-      if (!patrimonio) return;
+      if (!patrimonio || patrimonio.toUpperCase() === 'TESTE') return;
 
       const status = (row[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim();
       const statusLower = status.toLowerCase();
       const observacao = (row[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim();
       const observacaoLower = observacao.toLowerCase();
 
-      // Se o status for "ESTAÇÃO", o nome da estação está na observação
-      const effectiveStatus = (statusLower === 'estação' || statusLower === 'estacao') ? observacaoLower : statusLower;
+      // Determina se é um relatório de mudança de status ou apenas localização
+      const isStatusChange = ['recolhida', 'vandalizada', 'filial', 'oficina', 'recolher', 'vandalismo'].some(s => statusLower.includes(s));
+      const isRecovery = ['ativo', 'manutenção', 'manutencao'].some(s => statusLower.includes(s));
+      const isStation = stationNames.includes(statusLower) || statusLower === 'estação' || statusLower === 'estacao';
 
-      // Update if this report is newer than what we have
-      if (!lastReports[patrimonio] || timestamp > lastReports[patrimonio].timestamp) {
+      const effectiveStatus = isStation ? (statusLower === 'estação' || statusLower === 'estacao' ? observacaoLower : statusLower) : statusLower;
+
+      const currentLast = lastReports[patrimonio];
+      
+      // Prioridade: Status Change > Recovery > Location
+      let shouldUpdate = false;
+      if (!currentLast) {
+        shouldUpdate = true;
+      } else {
+        if (isStatusChange) {
+          // Se for uma nova sinalização, atualiza se for mais recente que a sinalização atual
+          if (!currentLast.isStatusChange || timestamp > currentLast.timestamp) {
+            shouldUpdate = true;
+          }
+        } else if (isRecovery) {
+          // Se for uma recuperação, ela só sobrescreve se for MAIS RECENTE que o status atual
+          if (timestamp > currentLast.timestamp) {
+            shouldUpdate = true;
+          }
+        } else if (!currentLast.isStatusChange && !currentLast.isRecovery && timestamp > currentLast.timestamp) {
+          // Relatórios de localização só atualizam se não houver status crítico
+          shouldUpdate = true;
+        }
+      }
+
+      if (shouldUpdate) {
         lastReports[patrimonio] = {
           timestamp: timestamp,
-          status: effectiveStatus
+          status: effectiveStatus,
+          observation: observacao,
+          isStatusChange: isStatusChange,
+          isRecovery: isRecovery
         };
       }
     });
 
-    const vandalizadas = new Set();
-    const filial = new Set();
+    const vandalizadas = [];
+    const filial = [];
 
     Object.keys(lastReports).forEach(patrimonio => {
       const lastReport = lastReports[patrimonio];
-      const currentStatus = bikeStatuses[patrimonio] || '';
       
-      // Se o último relatório for Manutenção ou Ativo, ignoramos (já processado)
-      if (lastReport.status === 'manutenção' || lastReport.status === 'manutencao' || lastReport.status === 'ativo') {
-        return;
-      }
+      // Se o último relatório for Recuperação, ignoramos
+      if (lastReport.isRecovery) return;
 
-      // Exclude station names
-      if (stationNames.includes(lastReport.status)) return;
-      
-      // Exclude "Não encontrada"
-      if (lastReport.status === 'não encontrada' || lastReport.status === 'nao encontrada') return;
+      const item = { patrimonio: patrimonio, observation: lastReport.observation || '' };
 
-      if (lastReport.status === 'vandalizada') {
-        if (currentStatus !== 'Vandalizada' && currentStatus !== 'Manutenção') {
-          vandalizadas.add(patrimonio);
-        }
-      } else if (lastReport.status.includes('filial') || lastReport.status.includes('recolhida')) {
-        if (currentStatus !== 'Manutenção') {
-          filial.add(patrimonio);
-        }
+      if (lastReport.status.includes('vandalizada') || lastReport.status.includes('vandalismo')) {
+        vandalizadas.push(item);
+      } else if (lastReport.status.includes('filial') || lastReport.status.includes('recolhida') || lastReport.status.includes('recolher')) {
+        filial.push(item);
       }
     });
 
     const result = { 
-      vandalizadas: Array.from(vandalizadas).sort((a, b) => parseInt(a) - parseInt(b)), 
-      filial: Array.from(filial).sort((a, b) => parseInt(a) - parseInt(b))
+      vandalizadas: vandalizadas.sort((a, b) => {
+        const numA = parseInt(a.patrimonio.replace(/\D/g, '')) || 0;
+        const numB = parseInt(b.patrimonio.replace(/\D/g, '')) || 0;
+        return numA - numB;
+      }), 
+      filial: filial.sort((a, b) => {
+        const numA = parseInt(a.patrimonio.replace(/\D/g, '')) || 0;
+        const numB = parseInt(b.patrimonio.replace(/\D/g, '')) || 0;
+        return numA - numB;
+      })
     };
 
     if (!providedSheets) {
@@ -3196,4 +3322,217 @@ function cleanupRecentDuplicates() {
   } finally {
     lock.releaseLock();
   }
+}
+
+function addToMechanics(bikeNumber) {
+  const sheet = ss.getSheetByName(MECHANICS_SHEET_NAME);
+  if (!sheet) return;
+
+  const data = sheet.getDataRange().getValues();
+  const bikeNumberStr = String(bikeNumber).trim().replace(/^0+/, '');
+  
+  // Verifica se a bike já está no fluxo (não finalizada)
+  for (let i = 1; i < data.length; i++) {
+    const p = String(data[i][COLUMN_INDICES.MECHANICS.PATRIMONIO - 1]).trim().replace(/^0+/, '');
+    if (p === bikeNumberStr && 
+        data[i][COLUMN_INDICES.MECHANICS.STATUS - 1] !== 'Remanejada') {
+      return; // Já está no fluxo
+    }
+  }
+
+  sheet.appendRow([
+    bikeNumber,
+    'Aguardando Confirmação',
+    new Date(),
+    '', // Mecânico
+    '', // Tratativa
+    '', // Data Finalização
+    ''  // Carretinha
+  ]);
+}
+
+function getMechanicsList() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(MECHANICS_SHEET_NAME);
+  
+  // Se não existir, tenta criar
+  if (!sheet) {
+    try {
+      sheet = ss.insertSheet(MECHANICS_SHEET_NAME);
+      sheet.appendRow(['Patrimônio', 'Status', 'Data Entrada', 'Mecânico', 'Tratativa', 'Data Finalização', 'Carretinha']);
+    } catch (e) {
+      Logger.log('Erro ao criar planilha Mecanica: ' + e.message);
+    }
+  }
+
+  // Busca informações de bateria e carregamento da aba Bicicletas
+  const bikeSheet = ss.getSheetByName(BIKES_SHEET_NAME);
+  const bikeInfoMap = {};
+  if (bikeSheet) {
+    const bikeData = bikeSheet.getDataRange().getValues();
+    if (bikeData.length > 1) {
+      bikeData.slice(1).forEach(row => {
+        const patrimonio = String(row[COLUMN_INDICES.BIKES.PATRIMONIO - 1]).trim().replace(/^0+/, '');
+        if (patrimonio) {
+          let bateria = row[COLUMN_INDICES.BIKES.BATERIA - 1];
+          // Se a bateria for um decimal (ex: 0.95), converte para porcentagem (95)
+          if (typeof bateria === 'number' && bateria <= 1 && bateria > 0) {
+            bateria = Math.round(bateria * 100);
+          } else if (typeof bateria === 'string' && bateria.includes('%')) {
+            bateria = parseInt(bateria.replace('%', ''));
+          }
+          
+          bikeInfoMap[patrimonio] = {
+            bateria: bateria,
+            carregamento: row[COLUMN_INDICES.BIKES.CARREGAMENTO - 1]
+          };
+        }
+      });
+    }
+  }
+  
+  const results = [];
+  const existingBikes = new Set();
+  
+  if (sheet) {
+    const data = sheet.getDataRange().getValues();
+    if (data.length > 1) {
+      data.slice(1).forEach((row, index) => {
+        const patrimonio = String(row[COLUMN_INDICES.MECHANICS.PATRIMONIO - 1]).trim().replace(/^0+/, '');
+        const status = row[COLUMN_INDICES.MECHANICS.STATUS - 1];
+        if (status !== 'Remanejada') {
+          const bikeInfo = bikeInfoMap[patrimonio] || {};
+          results.push({
+            row: index + 2,
+            patrimonio: patrimonio,
+            status: status,
+            dataEntrada: row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1],
+            mecanico: row[COLUMN_INDICES.MECHANICS.MECANICO - 1],
+            tratativa: row[COLUMN_INDICES.MECHANICS.TRATATIVA - 1],
+            dataFinalizacao: row[COLUMN_INDICES.MECHANICS.DATA_FINALIZACAO - 1],
+            carretinha: row[COLUMN_INDICES.MECHANICS.CARRETINHA - 1],
+            bateria: bikeInfo.bateria,
+            carregamento: bikeInfo.carregamento
+          });
+          existingBikes.add(patrimonio);
+        }
+      });
+    }
+  }
+  
+  // Sincroniza com a lógica do ADM (Relatório) para garantir que bikes sinalizadas apareçam
+  try {
+    // Usamos 'week' para garantir que pegamos um histórico maior
+    const changeStatus = getChangeStatusData('week');
+    if (changeStatus.success && changeStatus.data) {
+      const allPending = [...(changeStatus.data.vandalizadas || []), ...(changeStatus.data.filial || [])];
+      allPending.forEach(item => {
+        const pStr = String(item.patrimonio).trim().replace(/^0+/, '');
+        if (pStr && !existingBikes.has(pStr)) {
+          const bikeInfo = bikeInfoMap[pStr] || {};
+          results.push({
+            row: -1,
+            patrimonio: pStr,
+            status: 'Aguardando Confirmação',
+            dataEntrada: new Date(),
+            mecanico: '',
+            tratativa: item.observation || '',
+            dataFinalizacao: '',
+            carretinha: '',
+            bateria: bikeInfo.bateria,
+            carregamento: bikeInfo.carregamento
+          });
+          existingBikes.add(pStr);
+        }
+      });
+    }
+  } catch (e) {
+    Logger.log('Erro ao sincronizar getMechanicsList com relatórios: ' + e.message);
+  }
+  
+  return { success: true, data: results };
+}
+
+function confirmMechanicsReceipt(bikeNumber, mechanicName) {
+  const sheet = ss.getSheetByName(MECHANICS_SHEET_NAME);
+  if (!sheet) return { success: false, error: 'Planilha Mecânica não encontrada.' };
+  
+  const data = sheet.getDataRange().getValues();
+  const pStr = String(bikeNumber).trim().replace(/^0+/, '');
+  
+  for (let i = 1; i < data.length; i++) {
+    const p = String(data[i][COLUMN_INDICES.MECHANICS.PATRIMONIO - 1]).trim().replace(/^0+/, '');
+    if (p === pStr && 
+        data[i][COLUMN_INDICES.MECHANICS.STATUS - 1] === 'Aguardando Confirmação') {
+      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.STATUS).setValue('Em Manutenção');
+      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.MECANICO).setValue(mechanicName);
+      return { success: true };
+    }
+  }
+  
+  // Se não estiver na planilha (veio dinamicamente do relatório), adiciona agora
+  sheet.appendRow([
+    bikeNumber,
+    'Em Manutenção',
+    new Date(),
+    mechanicName,
+    '', // Tratativa
+    '', // Data Finalização
+    ''  // Carretinha
+  ]);
+  return { success: true };
+}
+
+function finalizeMechanicsRepair(bikeNumber, mechanicName, treatment) {
+  const sheet = ss.getSheetByName(MECHANICS_SHEET_NAME);
+  if (!sheet) return { success: false, error: 'Planilha Mecânica não encontrada.' };
+  
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][COLUMN_INDICES.MECHANICS.PATRIMONIO - 1]) === String(bikeNumber) && 
+        data[i][COLUMN_INDICES.MECHANICS.STATUS - 1] === 'Em Manutenção') {
+      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.STATUS).setValue('Reserva');
+      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.MECANICO).setValue(mechanicName);
+      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.TRATATIVA).setValue(treatment);
+      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.DATA_FINALIZACAO).setValue(new Date());
+      return { success: true };
+    }
+  }
+  return { success: false, error: 'Bicicleta não encontrada ou não está em manutenção.' };
+}
+
+function organizeTrailer(bikeNumbers, trailerName) {
+  const sheet = ss.getSheetByName(MECHANICS_SHEET_NAME);
+  if (!sheet) return { success: false, error: 'Planilha Mecânica não encontrada.' };
+  
+  const data = sheet.getDataRange().getValues();
+  const bikesToUpdate = Array.isArray(bikeNumbers) ? bikeNumbers : [bikeNumbers];
+  
+  let updatedCount = 0;
+  for (let i = 1; i < data.length; i++) {
+    const patrimonio = String(data[i][COLUMN_INDICES.MECHANICS.PATRIMONIO - 1]);
+    if (bikesToUpdate.includes(patrimonio) && data[i][COLUMN_INDICES.MECHANICS.STATUS - 1] === 'Reserva') {
+      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.CARRETINHA).setValue(trailerName);
+      updatedCount++;
+    }
+  }
+  
+  return { success: true, message: `${updatedCount} bikes organizadas na carretinha ${trailerName}.` };
+}
+
+function finalizeTrailer(trailerName) {
+  const sheet = ss.getSheetByName(MECHANICS_SHEET_NAME);
+  if (!sheet) return { success: false, error: 'Planilha Mecânica não encontrada.' };
+  
+  const data = sheet.getDataRange().getValues();
+  let updatedCount = 0;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][COLUMN_INDICES.MECHANICS.CARRETINHA - 1]) === String(trailerName) && 
+        data[i][COLUMN_INDICES.MECHANICS.STATUS - 1] === 'Reserva') {
+      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.STATUS).setValue('Remanejada');
+      updatedCount++;
+    }
+  }
+  
+  return { success: true, message: `${updatedCount} bikes da carretinha ${trailerName} finalizadas.` };
 }

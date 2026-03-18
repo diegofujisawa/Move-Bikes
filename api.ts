@@ -227,6 +227,15 @@ export const apiCall = async (payload: any, retries = 1, silent = false): Promis
       if (result.sessionExpired) {
         window.dispatchEvent(new CustomEvent('session-expired', { detail: result.error }));
       }
+      
+      // Se o servidor indicar que o erro é temporário/tentável novamente
+      if (result.retryable && retries > 0) {
+        const backoff = (2 - retries + 1) * 2000 + Math.random() * 1000;
+        if (!silent) console.warn(`Servidor ocupado (retryable). Tentando novamente em ${Math.round(backoff)}ms...`);
+        await new Promise(resolve => setTimeout(resolve, backoff));
+        return apiCall(payload, retries - 1, silent);
+      }
+      
       throw new Error(result.error || 'O servidor retornou uma falha sem especificar o motivo.');
     }
 
