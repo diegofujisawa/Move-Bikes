@@ -79,6 +79,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const [searchTerm, setSearchTerm] = useState('');
     const [searchedBike, setSearchedBike] = useState<BicycleData | null>(null);
     const [isSearching, setIsSearching] = useState(false);
+    const searchCacheRef = useRef<Record<string, BicycleData>>({});
     const [pendingRequests, setPendingRequests] = useState<PickupRequest[]>([]);
     const [routeBikes, setRouteBikes] = useState<string[]>([]);
     const [routeBikesDetails, setRouteBikesDetails] = useState<Record<string, any>>({});
@@ -887,7 +888,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     };
 
     const handleSearch = async (bikeToSearch?: string) => {
-        const term = bikeToSearch || searchTerm.trim();
+        const term = (bikeToSearch || searchTerm).trim();
         
         // Se o termo for vazio, limpa a busca
         if (!term) {
@@ -896,9 +897,26 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             return;
         }
 
+        const cached = searchCacheRef.current[term];
+        if (cached) {
+            setSearchedBike(cached);
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+            // Ainda faz a busca em background para atualizar os dados, mas sem bloquear a UI
+            apiCall({ action: 'search', bikeNumber: term }).then(result => {
+                if (result.success && result.data) {
+                    const sanitizedData = {
+                        ...result.data,
+                        'Patrimônio': String(result.data['Patrimônio'])
+                    };
+                    searchCacheRef.current[term] = sanitizedData;
+                    setSearchedBike(sanitizedData);
+                }
+            }).catch(() => {});
+            return;
+        }
+
         setIsSearching(true);
         setError(null);
-        // setSearchedBike(null); // REMOVIDO: Mantém a bike anterior visível para evitar "flicker"
         
         if (bikeToSearch) {
             setSearchTerm(bikeToSearch);
@@ -913,6 +931,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                     'Patrimônio': String(result.data['Patrimônio'])
                 };
                 setSearchedBike(sanitizedData);
+                searchCacheRef.current[term] = sanitizedData;
                 // Sempre rola para o topo para garantir que o resultado seja visto
                 window.scrollTo({ top: 0, behavior: 'smooth' });
             } else {
