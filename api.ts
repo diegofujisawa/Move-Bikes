@@ -2,83 +2,169 @@ import { SCRIPT_URL as RAW_SCRIPT_URL } from './components/constants';
 
 const SCRIPT_URL = RAW_SCRIPT_URL.trim();
 
-// Helper para fetch com timeout, para evitar que a aplicação fique travada
-// esperando uma resposta do servidor por tempo indeterminado.
-async function fetchWithTimeout(resource: RequestInfo, options: RequestInit & { timeout?: number } = {}) {
-  // ATUALIZAÇÃO: Timeout padrão aumentado para 60 segundos para maior resiliência.
-  const { timeout = 60000 } = options; 
-  
+// =================================================================
+// AÇÕES DE LEITURA — retry seguro (nunca duplicam dados)
+// AÇÕES DE ESCRITA — retry apenas com idempotencyKey
+// =================================================================
+const READ_ACTIONS = new Set([
+  'health', 'search', 'getRequests', 'getRequestsHistory', 'getStations',
+  'getMotoristas', 'getAllPatrimonioNumbers', 'getDriverLocations',
+  'getDriverState', 'getBikeDetailsBatch', 'getDailyReportData',
+  'getSchedule', 'getBikeStatuses', 'getReporData', 'getChangeStatusData',
+  'getAlerts', 'getVandalized', 'getRouteDetails', 'getVehiclePlates',
+  'getDriversSummary', 'getAdminAlerts', 'getMechanicsList',
+  'exportAllData', 'sync',
+]);
+
+// =================================================================
+// SESSÃO — sessionStorage (isolado por aba) para dados ativos.
+// localStorage apenas para preferências persistentes.
+// =================================================================
+function getSessionUser(): { name: string; sessionId?: string } | null {
+  try {
+    const raw = sessionStorage.getItem('bike_app_user')
+      || localStorage.getItem('bike_app_user');
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function getSessionId(): string | null {
+  return (
+    sessionStorage.getItem('bike_app_session_id') ||
+    localStorage.getItem('bike_app_session_id') ||
+    null
+  );
+}
+
+// =================================================================
+// IDEMPOTENCY KEY
+// Gerado uma vez por operação de escrita, reutilizado em retries.
+// O backend rejeita silenciosamente qualquer repetição do mesmo key.
+// =================================================================
+function generateIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
+// =================================================================
+// FETCH COM TIMEOUT
+// =================================================================
+async function fetchWithTimeout(
+  resource: RequestInfo,
+  options: RequestInit & { timeout?: number } = {}
+): Promise<Response> {
+  const { timeout = 60000 } = options;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
-
   try {
-    const response = await fetch(resource, {
-      ...options,
-      signal: controller.signal  
-    });
-    return response;
+    return await fetch(resource, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timeoutId);
   }
 }
 
-/**
- * Função para testar a conexão com a API do Google Apps Script.
- * Usa uma requisição GET com timeout para um "health check" rápido e seguro.
- * @returns Um objeto com status 'ok' se a conexão for bem-sucedida.
- */
-export const checkApiConnection = async () => {
+// =================================================================
+// PARSEIA RESPOSTA — trata erros específicos do Google Apps Script
+// =================================================================
+function parseJsonResponse(text: string): any {
   try {
-    // Usamos apiGetCall para aproveitar a lógica de tratamento de erros e CORS já implementada.
-    // Passamos uma ação inexistente ou vazia, o que fará o doGet retornar o status padrão "ok".
-    const result = await apiGetCall('health');
-    return result;
-
-  } catch (err: any) {
-     console.error("Falha no teste de conexão com a API:", err);
-     
-     const errorMessage = err.message || '';
-     
-     if (err.name === 'AbortError' || errorMessage.includes('aborted')) {
-       throw new Error('A conexão com o servidor demorou muito (timeout). Verifique se a URL do script está correta e se ele está implantado.');
-     }
-     
-     // O erro "Failed to fetch" é genérico e acontece quando a requisição nem chega a ser completada (CORS, DNS, Rede)
-     if (errorMessage.includes('Failed to fetch') || err.name === 'TypeError') {
-        throw new Error('Falha de conexão (Failed to fetch). Isso indica que o navegador bloqueou a requisição. CAUSA MAIS COMUM: O script não foi implantado com acesso para "Qualquer pessoa" (Anyone). Por favor, refaça a implantação no Google Apps Script selecionando "Quem pode acessar: Qualquer pessoa".');
-     }
-     
-     throw new Error(errorMessage || 'Erro desconhecido durante o teste de conexão.');
+    return JSON.parse(text);
+  } catch {
+    if (
+      text.includes('Service invoked too many times') ||
+      text.includes('Too many simultaneous invocations') ||
+      text.includes('ScriptError')
+    ) {
+      throw new Error('__SERVER_BUSY__');
+    }
+    if (text.includes('<title>Error</title>')) {
+      throw new Error(
+        'O servidor retornou uma página de erro do Google. ' +
+        'Verifique se o script está implantado corretamente.'
+      );
+    }
+    throw new Error(
+      'O servidor retornou uma resposta inesperada. ' +
+      'Verifique os logs de execução do Apps Script.'
+    );
   }
-};
+}
 
-/**
- * Função para fazer chamadas GET à API do Google Apps Script.
- * Usada para buscar dados, como a localização de motoristas, de forma mais
- * compatível com CORS do que POST.
- * @param action A ação a ser executada no backend.
- * @param params Parâmetros adicionais para a query string.
- * @returns A resposta JSON do servidor.
- */
-export const apiGetCall = async (action: string, params: Record<string, string> = {}, retries = 1) => {
+// =================================================================
+// ENRIQUECE PAYLOAD com dados de sessão
+// =================================================================
+function enrichPayload(payload: Record<string, any>): Record<string, any> {
+  const enriched = { ...payload };
+  const sessionId = getSessionId();
+  const user = getSessionUser();
+
+  if (sessionId && !enriched.sessionId) {
+    enriched.sessionId = sessionId;
+  }
+  if (user?.name && !enriched.login && !enriched.driverName && !enriched.userName) {
+    enriched.userName = user.name;
+  }
+
+  return enriched;
+}
+
+// =================================================================
+// HELPERS
+// =================================================================
+function isRetryableNetworkError(err: any): boolean {
+  return (
+    err?.name === 'AbortError' ||
+    err?.message?.includes('aborted') ||
+    err?.message?.includes('Failed to fetch') ||
+    err?.name === 'TypeError'
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function normalizeError(err: any): Error {
+  if (err?.name === 'AbortError' || err?.message?.includes('aborted')) {
+    return new Error(
+      'A operação demorou muito para ser concluída (timeout). Verifique sua conexão de rede.'
+    );
+  }
+  if (err?.message?.includes('Failed to fetch') || err?.name === 'TypeError') {
+    return new Error(
+      'Falha de comunicação com o servidor (Failed to fetch). ' +
+      'Certifique-se de que o script está implantado como "App da Web" ' +
+      'com acesso "Qualquer pessoa".'
+    );
+  }
+  return err instanceof Error ? err : new Error(String(err?.message || err));
+}
+
+// =================================================================
+// API GET — leituras via GET (compatível com CORS sem preflight)
+// =================================================================
+export const apiGetCall = async (
+  action: string,
+  params: Record<string, string> = {},
+  retries = 1
+): Promise<any> => {
   const url = new URL(SCRIPT_URL);
   url.searchParams.append('action', action);
-  
-  // Inclui sessionId e userName se disponível
-  const sessionId = localStorage.getItem('bike_app_session_id');
-  if (sessionId) {
-    url.searchParams.append('sessionId', sessionId);
-  }
 
-  const savedUser = localStorage.getItem('bike_app_user');
-  if (savedUser) {
-    try {
-      const user = JSON.parse(savedUser);
-      if (user.name) url.searchParams.append('userName', user.name);
-    } catch { /* ignore */ }
-  }
+  const sessionId = getSessionId();
+  if (sessionId) url.searchParams.append('sessionId', sessionId);
 
-  Object.entries(params).forEach(([key, value]) => url.searchParams.append(key, value));
+  const user = getSessionUser();
+  if (user?.name) url.searchParams.append('userName', user.name);
+
+  Object.entries(params).forEach(([k, v]) => url.searchParams.append(k, v));
 
   try {
     const response = await fetchWithTimeout(url.toString(), {
@@ -91,173 +177,141 @@ export const apiGetCall = async (action: string, params: Record<string, string> 
     });
 
     if (!response.ok) {
-        throw new Error(`Erro de rede na chamada GET: ${response.status} ${response.statusText}`);
+      throw new Error(`Erro de rede: ${response.status} ${response.statusText}`);
     }
 
-    const textResponse = await response.text();
-    let result;
-    try {
-        result = JSON.parse(textResponse);
-    } catch {
-        console.error("Falha ao parsear a resposta JSON (GET):", textResponse);
-        let detailedError = "O servidor retornou uma resposta inesperada (não-JSON) para uma requisição GET. Isso pode indicar um erro no script do Google. ";
-        if (textResponse.includes('<title>Error</title>')) {
-          detailedError += " A resposta parece ser uma página de erro do Google.";
-        }
-        throw new Error(detailedError);
-    }
+    const result = parseJsonResponse(await response.text());
 
-    if (result.success === false) { 
+    if (result.success === false) {
       if (result.sessionExpired) {
         window.dispatchEvent(new CustomEvent('session-expired', { detail: result.error }));
       }
-      throw new Error(result.error || 'O servidor (GET) retornou uma falha sem especificar o motivo.');
+      throw new Error(result.error || 'O servidor retornou uma falha.');
     }
+
     return result;
 
   } catch (err: any) {
-    if (retries > 0 && (err.name === 'AbortError' || err.message.includes('aborted') || err.message.includes('Failed to fetch'))) {
-      console.warn(`Tentando novamente a chamada GET (${retries} tentativas restantes)...`);
-      await new Promise(resolve => setTimeout(resolve, 2000));
+    if (retries > 0 && isRetryableNetworkError(err)) {
+      console.warn(`[GET] Tentando novamente (${retries} restantes)...`);
+      await delay(2000);
       return apiGetCall(action, params, retries - 1);
     }
-
-    console.error(`Falha na chamada GET da API para ${url.toString()}.`, err);
-    if (err.name === 'AbortError' || err.message.includes('aborted')) {
-      throw new Error('A busca de dados demorou muito para responder (timeout).');
-    }
-    if (err.message.includes('Failed to fetch') || err.name === 'TypeError') {
-      throw new Error('Falha de comunicação com o servidor (Failed to fetch). Isso geralmente indica que o script não foi implantado corretamente. CERTIFIQUE-SE DE QUE: 1. O script está implantado como "App da Web". 2. "Quem pode acessar" está definido como "Qualquer pessoa" (Anyone). 3. Você usou a URL da "Implantação Executável" (/exec).');
-    }
-    throw err;
+    throw normalizeError(err);
   }
 };
 
+// =================================================================
+// API POST — ponto central de todas as chamadas ao backend
+//
+// REGRA DE RETRY:
+//   Leitura  → retry livre, sem risco de duplicata
+//   Escrita  → retry com mesmo idempotencyKey, backend deduplica
+// =================================================================
+export const apiCall = async (
+  payload: Record<string, any>,
+  retries = 1,
+  silent = false
+): Promise<any> => {
+  const action = (payload.action || '').toString();
+  const isReadAction = READ_ACTIONS.has(action);
 
-/**
- * Função centralizada para fazer chamadas à API do Google Apps Script.
- * Usa 'Content-Type: text/plain' para evitar a verificação CORS "pre-flight"
- * e inclui um timeout para robustez.
- * @param payload O objeto de dados a ser enviado como corpo da requisição.
- * @param retries Número de tentativas em caso de falha (padrão 1).
- * @returns A resposta JSON do servidor.
- */
-export const apiCall = async (payload: any, retries = 1, silent = false): Promise<any> => {
+  // Gera o key uma vez por operação de escrita.
+  // Se o caller já enviou um key (retry externo), reutiliza.
+  const idempotencyKey = !isReadAction
+    ? (payload.idempotencyKey || generateIdempotencyKey())
+    : undefined;
+
+  const enriched = enrichPayload({
+    ...payload,
+    ...(idempotencyKey ? { idempotencyKey } : {}),
+  });
+
   try {
-    // Tenta obter o nome e sessionId do usuário logado
-    const savedUser = localStorage.getItem('bike_app_user');
-    let userName = '';
-    let storedSessionId = localStorage.getItem('bike_app_session_id');
-
-    if (savedUser) {
-      try {
-        const user = JSON.parse(savedUser);
-        userName = user.name;
-        if (!storedSessionId && user.sessionId) {
-          storedSessionId = user.sessionId;
-        }
-      } catch {
-        // Ignora erro de parse
-      }
-    }
-
-    const enrichedPayload = { ...payload };
-    
-    // Garante que o sessionId seja enviado se disponível
-    if (storedSessionId && !enrichedPayload.sessionId) {
-      enrichedPayload.sessionId = storedSessionId;
-    }
-
-    // Garante que a identidade do usuário seja enviada se disponível
-    if (userName && !enrichedPayload.login && !enrichedPayload.driverName && !enrichedPayload.userName) {
-      enrichedPayload.userName = userName;
-    }
-
     const response = await fetchWithTimeout(SCRIPT_URL, {
       method: 'POST',
       mode: 'cors',
       credentials: 'omit',
       cache: 'no-store',
-      headers: {
-        'Content-Type': 'text/plain;charset=utf-8',
-      },
-      body: JSON.stringify(enrichedPayload),
-      redirect: 'follow', // Essencial para seguir o redirecionamento do Google
-      // ATUALIZAÇÃO: Timeout aumentado para 90 segundos para operações que podem demorar mais.
-      timeout: 90000, 
+      redirect: 'follow',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(enriched),
+      timeout: 90000,
     });
 
     if (!response.ok) {
-        const errorBody = await response.text().catch(() => "Não foi possível ler o corpo do erro.");
-        if (!silent) console.error("API response error body:", errorBody);
-        throw new Error(`Erro de rede: ${response.status} ${response.statusText}`);
+      const body = await response.text().catch(() => '');
+      if (!silent) console.error('[API] Resposta não-ok:', body);
+      throw new Error(`Erro de rede: ${response.status} ${response.statusText}`);
     }
 
-    const textResponse = await response.text();
-    let result;
+    let result: any;
     try {
-        result = JSON.parse(textResponse);
-    } catch {
-        console.error("Falha ao parsear a resposta JSON:", textResponse);
-        
-        // Se a resposta contiver erros típicos de concorrência do Google
-        if (textResponse.includes('Service invoked too many times') || 
-            textResponse.includes('Too many simultaneous invocations') ||
-            textResponse.includes('ScriptError')) {
-          
-          if (retries > 0) {
-            const backoff = (2 - retries + 1) * 2000 + Math.random() * 1000;
-            if (!silent) console.warn(`Servidor sobrecarregado. Tentando novamente em ${Math.round(backoff)}ms...`);
-            await new Promise(resolve => setTimeout(resolve, backoff));
-            return apiCall(payload, retries - 1, silent);
-          }
-          throw new Error('O servidor está com muitos acessos simultâneos no momento. Por favor, aguarde alguns segundos e tente novamente.');
+      result = parseJsonResponse(await response.text());
+    } catch (parseErr: any) {
+      if (parseErr.message === '__SERVER_BUSY__') {
+        if (retries > 0) {
+          const backoff = (2 - retries + 1) * 2000 + Math.random() * 1000;
+          if (!silent) console.warn(`[API] Servidor ocupado. Retry em ${Math.round(backoff)}ms...`);
+          await delay(backoff);
+          return apiCall({ ...payload, idempotencyKey }, retries - 1, silent);
         }
-
-        let detailedError = "O servidor retornou uma resposta inesperada (não-JSON). Isso geralmente indica um erro no script do Google. ";
-        detailedError += "Verifique os logs de execução do script para mais detalhes.";
-        
-        if (textResponse.includes('<title>Error</title>') || textResponse.includes('the script completed but did not return anything')) {
-          detailedError += " A resposta parece ser uma página de erro do Google.";
-        }
-        throw new Error(detailedError);
+        throw new Error('O servidor está sobrecarregado. Aguarde alguns segundos e tente novamente.');
+      }
+      throw parseErr;
     }
 
-    if (result.success === false) { 
+    // Backend confirmou deduplicação — operação já foi processada anteriormente
+    if (result.deduplicated) {
+      if (!silent) console.info(`[API] ${action} já processado (deduplicated). Ignorando retry.`);
+      return { success: true, deduplicated: true };
+    }
+
+    if (result.success === false) {
       if (result.sessionExpired) {
         window.dispatchEvent(new CustomEvent('session-expired', { detail: result.error }));
       }
-      
-      // Se o servidor indicar que o erro é temporário/tentável novamente
+
+      // Backend sinalizou que é seguro tentar novamente
       if (result.retryable && retries > 0) {
         const backoff = (2 - retries + 1) * 2000 + Math.random() * 1000;
-        if (!silent) console.warn(`Servidor ocupado (retryable). Tentando novamente em ${Math.round(backoff)}ms...`);
-        await new Promise(resolve => setTimeout(resolve, backoff));
-        return apiCall(payload, retries - 1, silent);
+        if (!silent) console.warn(`[API] Servidor ocupado (retryable). Retry em ${Math.round(backoff)}ms...`);
+        await delay(backoff);
+        return apiCall({ ...payload, idempotencyKey }, retries - 1, silent);
       }
-      
-      throw new Error(result.error || 'O servidor retornou uma falha sem especificar o motivo.');
+
+      throw new Error(result.error || 'O servidor retornou uma falha.');
     }
 
     return result;
 
   } catch (err: any) {
-    if (retries > 0 && (err.name === 'AbortError' || err.message.includes('aborted') || err.message.includes('Failed to fetch'))) {
-      if (!silent) console.warn(`Tentando novamente a chamada da API (${retries} tentativas restantes)...`);
-      // Espera um pouco antes de tentar novamente
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      return apiCall(payload, retries - 1, silent);
+    if (retries > 0 && isRetryableNetworkError(err)) {
+      if (isReadAction) {
+        // Leitura: retry direto, sem risco de duplicata
+        if (!silent) console.warn(`[API][READ] Retry por falha de rede (${retries} restantes)...`);
+        await delay(2000);
+        return apiCall(payload, retries - 1, silent);
+      } else {
+        // Escrita: retry com o mesmo idempotencyKey — backend deduplica
+        if (!silent) console.warn(`[API][WRITE] Retry com idempotencyKey (${retries} restantes)...`);
+        await delay(2000);
+        return apiCall({ ...payload, idempotencyKey }, retries - 1, silent);
+      }
     }
 
-    if (!silent) console.error(`Falha na chamada da API para ${SCRIPT_URL}. Payload: ${JSON.stringify(payload)}`, err);
-    else console.warn(`Falha silenciosa na chamada da API para ${SCRIPT_URL}.`);
-    
-    if (err.name === 'AbortError' || err.message.includes('aborted')) {
-      throw new Error('A operação demorou muito para ser concluída (timeout). Verifique sua conexão de rede ou a performance do servidor.');
-    }
-    if (err.message.includes('Failed to fetch') || err.name === 'TypeError') {
-      throw new Error('Falha de comunicação com o servidor (Failed to fetch). Isso geralmente indica que o script não foi implantado corretamente. CERTIFIQUE-SE DE QUE: 1. O script está implantado como "App da Web". 2. "Quem pode acessar" está definido como "Qualquer pessoa" (Anyone). 3. Você usou a URL da "Implantação Executável" (/exec).');
-    }
-    throw err;
+    if (!silent) console.error(`[API] Falha definitiva em "${action}":`, err);
+    throw normalizeError(err);
+  }
+};
+
+// =================================================================
+// HEALTH CHECK
+// =================================================================
+export const checkApiConnection = async (): Promise<any> => {
+  try {
+    return await apiGetCall('health');
+  } catch (err: any) {
+    throw normalizeError(err);
   }
 };
