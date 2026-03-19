@@ -1390,7 +1390,13 @@ const MainScreen: React.FC<MainScreenProps> = ({
           if (moved) {
             lastLocationUpdateRef.current = now;
             lastLocationRef.current = { lat: latitude, lng: longitude };
-            setDoc(doc(db, 'users', driverName), { currentLat: latitude, currentLng: longitude, lastLocationUpdate: serverTimestamp(), category }, { merge: true }).catch(() => {});
+            setDoc(doc(db, 'users', driverName), {
+              currentLat: latitude,
+              currentLng: longitude,
+              lastLocationUpdate: serverTimestamp(),
+              category,
+              name: driverName, // garante que o mapa consiga identificar o motorista
+            }, { merge: true }).catch(() => {});
             apiGetCall('updateLocation', { driverName, latitude: latitude.toFixed(6), longitude: longitude.toFixed(6) }).catch(() => {});
           }
         }
