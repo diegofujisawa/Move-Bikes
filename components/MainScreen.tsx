@@ -306,14 +306,20 @@ const MainScreen: React.FC<MainScreenProps> = ({
     const dedupRoute = [...new Set(newRoute.map(String))];
     const dedupCollected = [...new Set(newCollected.map(String))];
 
+    const t0 = Date.now();
+
     // Aguarda autenticação Firebase antes de qualquer escrita
     await waitForAuth();
+    console.log(`[Timing] waitForAuth: ${Date.now() - t0}ms`);
+
+    // 1. Firebase imediato (fonte de verdade)
     await setDoc(doc(db, 'users', driverName), {
       routeBikes: dedupRoute,
       collectedBikes: dedupCollected,
       lastUpdate: serverTimestamp(),
       sheetsSync: false,
     }, { merge: true });
+    console.log(`[Timing] Firebase write: ${Date.now() - t0}ms`);
 
     // 2. Sheets em paralelo — não bloqueia o motorista
     apiCall({
@@ -322,7 +328,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
       routeBikes: dedupRoute,
       collectedBikes: dedupCollected,
     }, 1, true).then(() => {
-      // 3. Após Sheets confirmar, sync imediato via ref (sem dependência circular)
+      console.log(`[Timing] Sheets confirmou: ${Date.now() - t0}ms`);
       setTimeout(() => refreshAllRef.current?.(true), 0);
     }).catch(e => console.warn('[Sheets] updateDriverState falhou:', e));
   }, [driverName]);
