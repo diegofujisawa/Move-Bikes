@@ -1,0 +1,118 @@
+{
+  "entities": {
+    "Bicycle": {
+      "title": "Bicycle",
+      "description": "Represents a bicycle in the system.",
+      "type": "object",
+      "properties": {
+        "patrimonio": { "type": "string", "description": "Unique ID of the bike." },
+        "modelo": { "type": "string", "description": "Model of the bike." },
+        "status": { "type": "string", "description": "Current status (e.g., Em Estação, Em Rota, Recolhida)." },
+        "localizacao": { "type": "string", "description": "Last known location name or station." },
+        "latitude": { "type": "number", "description": "Last known latitude." },
+        "longitude": { "type": "number", "description": "Last known longitude." },
+        "ultimaAtualizacao": { "type": "string", "format": "date-time", "description": "Timestamp of the last update." },
+        "observacao": { "type": "string", "description": "Additional notes." },
+        "situacao": { "type": "string", "description": "Current situation (e.g., Ativa, Vandalizada)." },
+        "dataSituacao": { "type": "string", "format": "date-time", "description": "When the situation was last changed." },
+        "responsavel": { "type": "string", "description": "Current driver or person responsible." },
+        "carretinha": { "type": "string", "description": "Name of the trailer the bike is in." }
+      },
+      "required": ["patrimonio", "status"]
+    },
+    "User": {
+      "title": "User",
+      "description": "Represents a driver or administrator.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID." },
+        "login": { "type": "string", "description": "Username for legacy login." },
+        "email": { "type": "string", "format": "email", "description": "User email." },
+        "category": { "type": "string", "description": "User role (e.g., ADM, MOTORISTA, MECANICA)." },
+        "plate": { "type": "string", "description": "Current vehicle plate." },
+        "lastKmFinal": { "type": "number", "description": "Last reported final KM." },
+        "gps": {
+          "type": "object",
+          "properties": {
+            "lat": { "type": "number" },
+            "lng": { "type": "number" },
+            "timestamp": { "type": "string", "format": "date-time" }
+          }
+        },
+        "routeBikes": { "type": "array", "items": { "type": "string" }, "description": "List of bike IDs in the driver's route." },
+        "collectedBikes": { "type": "array", "items": { "type": "string" }, "description": "List of bike IDs collected by the driver." }
+      },
+      "required": ["uid", "email", "category"]
+    },
+    "PickupRequest": {
+      "title": "Pickup Request",
+      "description": "A request to pick up a bike.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "bikeNumber": { "type": "string" },
+        "location": { "type": "string" },
+        "reason": { "type": "string" },
+        "recipient": { "type": "string" },
+        "status": { "type": "string", "enum": ["Pendente", "Aceita", "Recusada", "Finalizada"] },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "driverName": { "type": "string" },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" }
+      },
+      "required": ["bikeNumber", "status", "timestamp"]
+    },
+    "Report": {
+      "title": "Report",
+      "description": "Daily or operation report.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "driverName": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "type": { "type": "string" },
+        "bikeNumber": { "type": "string" },
+        "observation": { "type": "string" },
+        "kmFinal": { "type": "number" },
+        "plate": { "type": "string" }
+      },
+      "required": ["driverName", "date", "type"]
+    },
+    "Alert": {
+      "title": "Alert",
+      "description": "System alerts for missing or vandalized bikes.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "bikeNumber": { "type": "string" },
+        "type": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "driverName": { "type": "string" },
+        "status": { "type": "string", "enum": ["Pendente", "Encontrada"] }
+      },
+      "required": ["bikeNumber", "type", "status"]
+    }
+  },
+  "firestore": {
+    "/bikes/{patrimonio}": {
+      "schema": "Bicycle",
+      "description": "Collection of all bicycles."
+    },
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "Collection of all users and their states."
+    },
+    "/requests/{id}": {
+      "schema": "PickupRequest",
+      "description": "Collection of pickup requests."
+    },
+    "/reports/{id}": {
+      "schema": "Report",
+      "description": "Collection of operational reports."
+    },
+    "/alerts/{id}": {
+      "schema": "Alert",
+      "description": "Collection of system alerts."
+    }
+  }
+}

@@ -1,8 +1,11 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { BicycleData, PickupRequest, DriverLocation } from '../types';
-import { LogoutIcon, PlusIcon, PlusPlusIcon, MapIcon, SheetIcon, SearchIcon, AlertIcon, CalendarIcon, CarIcon, XIcon, BicycleIcon, MovingIcon, UserIcon, AlertTriangleIcon, QrCodeIcon, TrailerIcon, SwitchIcon, RefreshIcon } from './icons';
+import { LogoutIcon, PlusIcon, PlusPlusIcon, MapIcon, SheetIcon, SearchIcon, AlertIcon, CalendarIcon, CarIcon, XIcon, BicycleIcon, MovingIcon, UserIcon, AlertTriangleIcon, QrCodeIcon, TrailerIcon, SwitchIcon, RefreshIcon, DatabaseIcon, CheckCircleIcon } from './icons';
 import { Html5Qrcode } from 'html5-qrcode';
+import { auth, db } from '../firebase';
+import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
+import { collection, onSnapshot, query, doc, updateDoc, addDoc, serverTimestamp, getDoc, setDoc } from 'firebase/firestore';
 import ScheduleModal from './ScheduleModal';
 import ReporModal from './ReporModal';
 import MechanicRepairModal from './MechanicRepairModal';
@@ -17,8 +20,8 @@ import VehicleSwitchModal from './VehicleSwitchModal';
 import EditDriverModal from './EditDriverModal';
 import AdminAlerts from './AdminAlerts';
 import { apiCall, apiGetCall } from '../api';
-import { syncService } from '../syncService';
 import { User } from '../types';
+import { migrateDataToFirebase } from '../migrationService';
 
 interface MainScreenProps {
   driverName: string;
@@ -70,6 +73,32 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const [isLoading, setIsLoading] = useState(false);
     
     const [error, setError] = useState<string | null>(null);
+    const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+    useEffect(() => {
+        if (successMessage) {
+            const timer = setTimeout(() => {
+                setSuccessMessage(null);
+            }, 5000);
+            return () => clearTimeout(timer);
+        }
+    }, [successMessage]);
+    
+    useEffect(() => {
+        if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
+            Notification.requestPermission();
+        }
+    }, []);
+
+    const showNotification = (title: string, body: string) => {
+        if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+            try {
+                new Notification(title, { body, icon: '/favicon.ico' });
+            } catch (e) {
+                console.warn("Erro ao disparar notificação nativa:", e);
+            }
+        }
+    };
     
     const [isRequestModalOpen, setRequestModalOpen] = useState(false);
     const [isRouteModalOpen, setRouteModalOpen] = useState(false);
@@ -159,24 +188,104 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const normalizedCategory = category.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, "");
     const isAdm = normalizedCategory.includes('ADM');
     const isMecanica = normalizedCategory.includes('MECANICA') || normalizedCategory.includes('MECANICO');
+
+    // --- Real-time Firestore Listeners ---
+    useEffect(() => {
+        if (!driverName) return;
+
+        console.log("Iniciando listeners em tempo real do Firestore para:", driverName);
+
+        // Listener para Pedidos Pendentes
+        const qRequests = query(collection(db, 'requests'));
+        const unsubscribeRequests = onSnapshot(qRequests, (snapshot) => {
+            const updatedRequests: any[] = [];
+            let hasNewPending = false;
+            
+            snapshot.docChanges().forEach((change) => {
+                if (change.type === "added") {
+                    const data = change.doc.data();
+                    if (data.status === 'PENDENTE' && (data.recipient === driverName || data.recipient === 'Todos')) {
+                        hasNewPending = true;
+                    }
+                }
+            });
+
+            snapshot.forEach((doc) => {
+                const data = doc.data();
+                // Filtra pedidos pendentes ou destinados ao motorista atual
+                if (data.status === 'PENDENTE' || data.recipient === driverName || data.recipient === 'Todos') {
+                    updatedRequests.push({ id: doc.id, ...data });
+                }
+            });
+            
+            setPendingRequests(updatedRequests);
+            
+            if (hasNewPending) {
+                // Notifica o motorista sobre novo pedido
+                showNotification("Novo Pedido", "Você tem uma nova solicitação pendente.");
+            }
+        }, (err) => console.error("Erro no listener de pedidos:", err));
+
+        // Listener para Alertas (ADM)
+        let unsubscribeAlerts = () => {};
+        if (isAdm) {
+            const qAlerts = query(collection(db, 'alerts'));
+            unsubscribeAlerts = onSnapshot(qAlerts, (snapshot) => {
+                const updatedAlerts: any[] = [];
+                snapshot.forEach((doc) => {
+                    updatedAlerts.push({ id: doc.id, ...doc.data() });
+                });
+                setAlerts(updatedAlerts);
+                setAlertCount(updatedAlerts.length);
+            }, (err) => console.error("Erro no listener de alertas:", err));
+        }
+
+        // Listener para o estado do motorista atual
+        const unsubscribeUser = onSnapshot(doc(db, 'users', driverName), (docSnap) => {
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                
+                // Se estamos atualizando o estado manualmente, ignoramos o snapshot 
+                // para evitar que o estado local seja sobrescrito por dados antigos do Firestore
+                if (isUpdatingStateRef.current) return;
+                
+                // Se o snapshot for muito antigo (menor que o último update manual), ignoramos
+                // Isso evita o efeito "vai e volta" (disappearing and appearing)
+                const lastUpdate = data.lastUpdate?.toDate?.()?.getTime() || 0;
+                if (lastUpdate > 0 && lastManualUpdateRef.current > 0) {
+                    // Se o dado do Firestore for mais antigo que o nosso último update manual, ignoramos
+                    // Damos uma margem de 2 segundos para compensar diferenças de relógio e latência
+                    if (lastUpdate < lastManualUpdateRef.current - 2000) {
+                        return;
+                    }
+                }
+
+                lastFirestoreUpdateRef.current = Date.now();
+                setRouteBikes(data.routeBikes || []);
+                setCollectedBikes(data.collectedBikes || []);
+            }
+        }, (err) => console.error("Erro no listener do usuário:", err));
+
+        return () => {
+            unsubscribeRequests();
+            unsubscribeAlerts();
+            unsubscribeUser();
+        };
+    }, [driverName, isAdm]);
     const [requestsHistory, setRequestsHistory] = useState<any[]>([]);
     const [isHistoryLoading, setIsHistoryLoading] = useState(false);
     const [processingBikes, setProcessingBikes] = useState<Set<string>>(new Set());
     const processingBikesRef = useRef<Set<string>>(new Set());
 
-    useEffect(() => {
-        // A inscrição no syncService agora não é necessária se não estivermos exibindo a fila na UI
-        // O refreshAll já busca as ações pendentes diretamente do syncService.getPendingActions()
-        return () => {};
-    }, []);
-
     const isUpdatingStateRef = useRef(false);
     const lastManualUpdateRef = useRef<number>(0);
+    const lastFirestoreUpdateRef = useRef<number>(0);
     const lastLocationUpdateRef = useRef<number>(0);
     const lastLocationRef = useRef<{ lat: number, lng: number } | null>(null);
 
     const [lastSyncTime, setLastSyncTime] = useState<string>(new Date().toLocaleTimeString());
     const [isSyncing, setIsSyncing] = useState(false);
+    const [syncError, setSyncError] = useState<string | null>(null);
     const [isScannerOpen, setIsScannerOpen] = useState(false);
     const scannerRef = useRef<Html5Qrcode | null>(null);
 
@@ -240,6 +349,33 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const handleUpdateDriverState = async (targetDriverName: string, routeBikes: string[], collectedBikes: string[]) => {
         setIsLoading(true);
         try {
+            // 1. Atualiza no Firestore (Novo padrão)
+            const userRef = doc(db, 'users', targetDriverName);
+            await setDoc(userRef, {
+                routeBikes,
+                collectedBikes,
+                lastUpdate: serverTimestamp()
+            }, { merge: true });
+
+            // 2. Atualiza o status de cada bike no Firestore para manter consistência
+            const updatePromises = [];
+            for (const bikeId of routeBikes) {
+                updatePromises.push(setDoc(doc(db, 'bikes', bikeId), {
+                    status: 'Em Rota',
+                    responsavel: targetDriverName,
+                    ultimaAtualizacao: serverTimestamp()
+                }, { merge: true }));
+            }
+            for (const bikeId of collectedBikes) {
+                updatePromises.push(setDoc(doc(db, 'bikes', bikeId), {
+                    status: 'Recolhida',
+                    responsavel: targetDriverName,
+                    ultimaAtualizacao: serverTimestamp()
+                }, { merge: true }));
+            }
+            await Promise.all(updatePromises);
+
+            // 3. Mantém o legado via apiCall
             const result = await apiCall({
                 action: 'updateDriverState',
                 driverName: targetDriverName,
@@ -251,9 +387,10 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 refreshAll(true);
                 setIsEditDriverModalOpen(false);
             } else {
-                throw new Error(result.error || 'Erro ao atualizar estado do motorista');
+                throw new Error(result.error || 'Erro ao atualizar estado do motorista no legado');
             }
         } catch (err: any) {
+            console.error("Erro ao atualizar estado do motorista:", err);
             alert("Erro ao atualizar: " + err.message);
         } finally {
             setIsLoading(false);
@@ -273,7 +410,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const fetchSchedule = async () => {
         setIsScheduleLoading(true);
         try {
-            const result = await apiCall({ action: 'getSchedule', driverName });
+            const result = await apiCall({ action: 'getSchedule', driverName }, 1, true);
             if (result.success) {
                 setUserSchedule(result.data);
             } else {
@@ -353,7 +490,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 driversToProcess = [driverName];
             }
 
-            const requestsResult = await apiCall({ action: 'getRequests', driverName, category });
+            const requestsResult = await apiCall({ action: 'getRequests', driverName, category }, 1, true);
             const allPending = requestsResult.success ? requestsResult.data : [];
 
             const summary = await Promise.all(driversToProcess.map(async (d: string) => {
@@ -398,7 +535,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const fetchRequestsHistory = async () => {
         setIsHistoryLoading(true);
         try {
-            const result = await apiCall({ action: 'getRequestsHistory', driverName, category });
+            const result = await apiCall({ action: 'getRequestsHistory', driverName, category }, 1, true);
             if (result.success) {
                 setRequestsHistory(result.data);
             }
@@ -476,7 +613,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         };
     }, []);
 
-    const handleAcceptRequest = (requestId: number, bikeNumbers: string, reason: string = '') => {
+    const handleAcceptRequest = async (requestId: string, bikeNumbers: string, reason: string = '') => {
         if (isLoading) return;
         
         const bikesToAdd = String(bikeNumbers || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -492,49 +629,101 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         const isTrailer = (reason || '').toUpperCase().includes('CARRETINHA');
 
         isUpdatingStateRef.current = true;
-        setPendingRequests(prev => prev.filter(r => r.id !== requestId));
-        
-        if (isTrailer) {
-            // Se for carretinha, adiciona diretamente às bikes recolhidas e garante que não estejam no roteiro
-            setCollectedBikes(prev => [...new Set([...prev, ...bikesToAdd])]);
-            setRouteBikes(prev => prev.filter(b => !bikesToAdd.includes(String(b))));
-        } else {
-            // Se for roteiro normal, adiciona ao roteiro e garante que não estejam nas recolhidas (caso estivessem)
-            setRouteBikes(prev => [...new Set([...prev, ...bikesToAdd])]);
-            setCollectedBikes(prev => prev.filter(b => !bikesToAdd.includes(String(b))));
-        }
+        setIsLoading(true);
 
         try {
+            const requestRef = doc(db, 'requests', String(requestId));
+            await updateDoc(requestRef, {
+                status: 'ACEITO',
+                driverName: driverName,
+                acceptedAt: serverTimestamp()
+            });
+
+            const userRef = doc(db, 'users', driverName);
+            const userSnap = await getDoc(userRef);
+            const userData = userSnap.data() || {};
+            
+            if (isTrailer) {
+                const newCollected = [...new Set([...(userData.collectedBikes || []), ...bikesToAdd])];
+                await setDoc(userRef, { 
+                    collectedBikes: newCollected,
+                    lastUpdate: serverTimestamp()
+                }, { merge: true });
+                setCollectedBikes(newCollected);
+                
+                // Atualiza status das bikes no Firestore
+                const bikePromises = bikesToAdd.map(bikeId => 
+                    setDoc(doc(db, 'bikes', bikeId), {
+                        status: 'Recolhida',
+                        responsavel: driverName,
+                        ultimaAtualizacao: serverTimestamp()
+                    }, { merge: true })
+                );
+                await Promise.all(bikePromises);
+            } else {
+                const newRoute = [...new Set([...(userData.routeBikes || []), ...bikesToAdd])];
+                await setDoc(userRef, { 
+                    routeBikes: newRoute,
+                    lastUpdate: serverTimestamp()
+                }, { merge: true });
+                setRouteBikes(newRoute);
+
+                // Atualiza status das bikes no Firestore
+                const bikePromises = bikesToAdd.map(bikeId => 
+                    setDoc(doc(db, 'bikes', bikeId), {
+                        status: 'Em Rota',
+                        responsavel: driverName,
+                        ultimaAtualizacao: serverTimestamp()
+                    }, { merge: true })
+                );
+                await Promise.all(bikePromises);
+            }
+
+            setSuccessMessage("Pedido aceito com sucesso!");
+        } catch (err: any) {
+            console.error("Erro ao aceitar pedido:", err);
+            setError("Erro ao aceitar pedido no Firestore: " + err.message);
+            
+            // Tenta atualizar planilha (legado) se possível
             const payload = { 
                 action: 'acceptRequest', 
                 requestId, 
                 driverName,
-                bikeNumbers, // Incluído para o filtro de refreshAll
-                isTrailer    // Incluído para o filtro de refreshAll
+                bikeNumbers,
+                isTrailer
             };
-            syncService.queueAction(payload, 'acceptRequest', `Aceitar solicitação ${requestId}`);
-        } catch (err: any) {
-            setError(err.message);
+            apiCall(payload, 0, true).catch(e => console.warn("Falha ao atualizar planilha (legado):", e));
         } finally {
             isUpdatingStateRef.current = false;
+            setIsLoading(false);
             lastManualUpdateRef.current = Date.now();
         }
     };
 
-    const handleDeclineRequest = (requestId: number) => {
+    const handleDeclineRequest = async (requestId: string) => {
         if (isLoading) return;
         
         isUpdatingStateRef.current = true;
-        // ATUALIZAÇÃO OTIMISTA: Remove da lista imediatamente
-        setPendingRequests(prev => prev.filter(r => r.id !== requestId));
+        setIsLoading(true);
 
         try {
-            const payload = { action: 'declineRequest', requestId, driverName };
-            syncService.queueAction(payload, 'declineRequest', `Recusar solicitação ${requestId}`);
+            const requestRef = doc(db, 'requests', String(requestId));
+            await updateDoc(requestRef, {
+                status: 'RECUSADO',
+                declinedBy: driverName,
+                declinedAt: serverTimestamp()
+            });
+            setSuccessMessage("Pedido recusado.");
         } catch (err: any) {
-            setError(err.message);
+            console.error("Erro ao recusar pedido:", err);
+            setError("Erro ao recusar pedido no Firestore: " + err.message);
+            
+            // Tenta atualizar planilha (legado) se possível
+            const payload = { action: 'declineRequest', requestId, driverName };
+            apiCall(payload, 0, true).catch(e => console.warn("Falha ao atualizar planilha (legado):", e));
         } finally {
             isUpdatingStateRef.current = false;
+            setIsLoading(false);
             lastManualUpdateRef.current = Date.now();
         }
     };
@@ -543,6 +732,28 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         setIsLoading(true);
         setError(null);
         try {
+            // Tentar obter localização atual para o Firestore
+            let coords = { latitude: 0, longitude: 0 };
+            try {
+                coords = await getCurrentPosition();
+            } catch (e) {
+                console.warn("Não foi possível obter localização para o pedido:", e);
+            }
+
+            // 1. Criar no Firestore primeiro
+            await addDoc(collection(db, 'requests'), {
+                bikeNumber: details.bikeNumber,
+                location: details.location,
+                reason: details.reason,
+                recipient: details.recipient,
+                status: 'Pendente',
+                timestamp: serverTimestamp(),
+                driverName: driverName,
+                latitude: coords.latitude,
+                longitude: coords.longitude
+            });
+
+            // 2. Legado: Planilha
             const payload = {
                 action: 'createRequest',
                 patrimonio: details.bikeNumber,
@@ -551,18 +762,20 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 recipient: details.recipient
             };
 
-            await syncService.queueAction(payload, 'createRequest', `Solicitação bike ${details.bikeNumber}`);
+            apiCall(payload, 0, true).catch(e => console.warn("Falha ao atualizar planilha (legado):", e));
 
-            alert('Solicitação salva localmente e sendo enviada!');
+            alert('Solicitação salva com sucesso!');
             setRequestModalOpen(false);
             refreshAll(true);
         } catch (err: any) {
+            console.error("Erro ao criar solicitação:", err);
             setError(err.message);
+            alert(`Erro ao criar solicitação: ${err.message}`);
         } finally {
             setIsLoading(false);
         }
     };
-    
+
     const handleCreateRoute = async (details: { routeName: string; bikeNumbers: string[]; recipient: string; }) => {
         if (!details.bikeNumbers || details.bikeNumbers.length === 0) {
             alert('Por favor, insira ao menos um número de bicicleta.');
@@ -572,6 +785,28 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         setIsLoading(true);
         setError(null);
         try {
+            // Tentar obter localização atual
+            let coords = { latitude: 0, longitude: 0 };
+            try {
+                coords = await getCurrentPosition();
+            } catch (e) {
+                console.warn("Não foi possível obter localização para o roteiro:", e);
+            }
+
+            // 1. Criar no Firestore
+            await addDoc(collection(db, 'requests'), {
+                bikeNumber: details.bikeNumbers.join(', '),
+                location: 'Criado via Roteiro App',
+                reason: details.routeName || 'Roteiro sem nome',
+                recipient: details.recipient || 'Todos',
+                status: 'Pendente',
+                timestamp: serverTimestamp(),
+                driverName: driverName,
+                latitude: coords.latitude,
+                longitude: coords.longitude
+            });
+
+            // 2. Legado: API Call
             const result = await apiCall({
                 action: 'createRequest',
                 patrimonio: details.bikeNumbers.join(', '),
@@ -581,13 +816,14 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             });
 
             if (result.success) {
-                alert('Roteiro enviado como solicitação com sucesso!');
+                alert('Roteiro enviado com sucesso!');
                 setRouteModalOpen(false);
                 refreshAll(true);
             } else {
                 throw new Error(result.error || 'Falha ao criar a solicitação de roteiro.');
             }
         } catch (err: any) {
+            console.error("Erro ao enviar roteiro:", err);
             setError(err.message);
             alert(`Erro ao enviar roteiro: ${err.message}`);
         } finally {
@@ -604,6 +840,28 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         setIsLoading(true);
         setError(null);
         try {
+            // Tentar obter localização atual
+            let coords = { latitude: 0, longitude: 0 };
+            try {
+                coords = await getCurrentPosition();
+            } catch (e) {
+                console.warn("Não foi possível obter localização para a carretinha:", e);
+            }
+
+            // 1. Criar no Firestore
+            await addDoc(collection(db, 'requests'), {
+                bikeNumber: details.bikeNumbers.join(', '),
+                location: 'Criado via Carretinha App',
+                reason: `[CARRETINHA] ${details.routeName || 'Sem Nome'}`,
+                recipient: details.recipient || 'Todos',
+                status: 'Pendente',
+                timestamp: serverTimestamp(),
+                driverName: driverName,
+                latitude: coords.latitude,
+                longitude: coords.longitude
+            });
+
+            // 2. Legado: API Call
             const result = await apiCall({
                 action: 'createRequest',
                 patrimonio: details.bikeNumbers.join(', '),
@@ -613,13 +871,14 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             });
 
             if (result.success) {
-                alert('Carretinha enviada como solicitação com sucesso!');
+                alert('Carretinha enviada com sucesso!');
                 setTrailerModalOpen(false);
                 refreshAll(true);
             } else {
                 throw new Error(result.error || 'Falha ao criar a solicitação de carretinha.');
             }
         } catch (err: any) {
+            console.error("Erro ao enviar carretinha:", err);
             setError(err.message);
             alert(`Erro ao enviar carretinha: ${err.message}`);
         } finally {
@@ -656,18 +915,40 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const handleMechanicSelectionConfirm = async (mechanicName: string) => {
         setIsLoading(true);
         try {
+            const bikeNumber = selectedMechanicBike.patrimonio;
+
+            // 1. Atualizar no Firestore
+            const bikeRef = doc(db, 'bikes', bikeNumber);
+            await updateDoc(bikeRef, {
+                status: 'Mecânica',
+                responsavel: mechanicName,
+                ultimaAtualizacao: serverTimestamp()
+            });
+
+            // 2. Adicionar relatório
+            await addDoc(collection(db, 'reports'), {
+                bikeNumber: bikeNumber,
+                status: 'Mecânica',
+                driverName: driverName,
+                mechanicName: mechanicName,
+                timestamp: serverTimestamp(),
+                type: 'Mecânica'
+            });
+
+            // 3. Legado: Planilha
             const payload = { 
                 action: 'confirmMechanicsReceipt', 
-                bikeNumber: selectedMechanicBike.patrimonio, 
+                bikeNumber: bikeNumber, 
                 mechanicName: mechanicName 
             };
 
-            await syncService.queueAction(payload, 'confirmMechanicsReceipt', `Recebimento bike ${selectedMechanicBike.patrimonio}`);
+            apiCall(payload, 0, true).catch(e => console.warn("Falha ao atualizar planilha (legado):", e));
 
-            alert('Recebimento salvo localmente!');
+            alert('Recebimento confirmado com sucesso!');
             setIsMechanicSelectionModalOpen(false);
             refreshAll(true);
         } catch (err: any) {
+            console.error("Erro ao confirmar recebimento mecânica:", err);
             alert('Erro ao confirmar recebimento: ' + err.message);
         } finally {
             setIsLoading(false);
@@ -681,19 +962,42 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         }
         setIsLoading(true);
         try {
+            const bikeNumber = selectedMechanicBike.patrimonio;
+
+            // 1. Atualizar no Firestore
+            const bikeRef = doc(db, 'bikes', bikeNumber);
+            await updateDoc(bikeRef, {
+                status: 'Em Estação', // Assume que volta para estação após reparo
+                responsavel: null,
+                observacao: treatment,
+                ultimaAtualizacao: serverTimestamp()
+            });
+
+            // 2. Adicionar relatório
+            await addDoc(collection(db, 'reports'), {
+                bikeNumber: bikeNumber,
+                status: 'Em Estação',
+                driverName: driverName,
+                treatment: treatment,
+                timestamp: serverTimestamp(),
+                type: 'Reparo Finalizado'
+            });
+
+            // 3. Legado: Planilha
             const payload = { 
                 action: 'finalizeMechanicsRepair', 
-                bikeNumber: selectedMechanicBike.patrimonio, 
+                bikeNumber: bikeNumber, 
                 mechanicName: driverName,
                 treatment: treatment
             };
 
-            await syncService.queueAction(payload, 'finalizeMechanicsRepair', `Reparo bike ${selectedMechanicBike.patrimonio}`);
+            apiCall(payload, 0, true).catch(e => console.warn("Falha ao atualizar planilha (legado):", e));
 
-            alert('Reparo salvo localmente!');
+            alert('Reparo finalizado com sucesso!');
             setIsMechanicRepairModalOpen(false);
             refreshAll(true);
         } catch (err: any) {
+            console.error("Erro ao finalizar reparo mecânica:", err);
             alert('Erro ao finalizar reparo: ' + err.message);
         } finally {
             setIsLoading(false);
@@ -707,11 +1011,25 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         }
         setIsLoading(true);
         try {
+            // 1. Atualizar no Firestore para cada bike
+            const updatePromises = bikeNumbers.map(async (bikeNumber) => {
+                const bikeRef = doc(db, 'bikes', bikeNumber);
+                return updateDoc(bikeRef, {
+                    carretinha: trailerName,
+                    ultimaAtualizacao: serverTimestamp()
+                });
+            });
+
+            await Promise.all(updatePromises);
+
+            // 2. Legado: Planilha
             const payload = { action: 'organizeTrailer', bikeNumbers, trailerName };
-            await syncService.queueAction(payload, 'organizeTrailer', `Organizar ${trailerName}`);
-            alert('Organização salva localmente!');
+            apiCall(payload, 0, true).catch(e => console.warn("Falha ao atualizar planilha (legado):", e));
+            
+            alert('Organização salva com sucesso!');
             refreshAll(true);
         } catch (err: any) {
+            console.error("Erro ao organizar carretinha:", err);
             alert('Erro ao organizar carretinha: ' + err.message);
         } finally {
             setIsLoading(false);
@@ -721,18 +1039,35 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
     const handleFinalizeTrailer = async (trailerName: string) => {
         setIsLoading(true);
         try {
+            // 1. Identifica as bikes que estão nessa carretinha para atualizar no Firestore
+            const bikesInTrailer = Object.entries(collectedBikesDetails)
+                .filter(([, details]) => details.carretinha === trailerName)
+                .map(([id]) => id);
+
+            // 2. Atualiza no Firestore: remove a carretinha de cada bike
+            const bikePromises = bikesInTrailer.map(bikeId => 
+                setDoc(doc(db, 'bikes', bikeId), {
+                    carretinha: null,
+                    ultimaAtualizacao: serverTimestamp()
+                }, { merge: true })
+            );
+            await Promise.all(bikePromises);
+
+            // 3. Mantém o legado via Planilha
             const payload = { action: 'finalizeTrailer', trailerName };
-            await syncService.queueAction(payload, 'finalizeTrailer', `Finalizar ${trailerName}`);
+            apiCall(payload, 0, true).catch(e => console.warn("Falha ao atualizar planilha (legado):", e));
+            
             alert('Finalização salva localmente!');
             refreshAll(true);
         } catch (err: any) {
+            console.error("Erro ao finalizar carretinha:", err);
             alert('Erro ao finalizar carretinha: ' + err.message);
         } finally {
             setIsLoading(false);
         }
     };
 
-    const handleStatusUpdate = (status: string) => {
+    const handleStatusUpdate = async (status: string) => {
         if (!searchedBike) return;
         const bikeNumber = String(searchedBike['Patrimônio']);
         
@@ -742,66 +1077,96 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         
         setProcessingBikes(new Set(processingBikesRef.current));
         isUpdatingStateRef.current = true;
-
-        // ATUALIZAÇÃO OTIMISTA: Limpa a busca e atualiza as listas imediatamente
-        setSearchedBike(null);
-        setSearchTerm('');
-        setError(null);
-
-        if (status === 'Recolhida') {
-            if (collectedBikes.includes(bikeNumber)) {
-                alert(`Você já está em posse da bicicleta ${bikeNumber}.`);
-                isUpdatingStateRef.current = false;
-                processingBikesRef.current.delete(bikeNumber);
-                setProcessingBikes(new Set(processingBikesRef.current));
-                return;
-            }
-            
-            setCollectedBikes(prev => [...new Set([...prev, bikeNumber])]);
-            setRouteBikes(prev => prev.filter(b => String(b) !== bikeNumber));
-            
-            // Sincroniza e loga no relatório via cache local
-            try {
-                const payload = {
-                    action: 'finalizeRouteBike',
-                    driverName,
-                    bikeNumber,
-                    finalStatus: 'Recolhida',
-                    finalObservation: '',
-                };
-
-                syncService.queueAction(payload, 'finalizeRouteBike', `Recolhida bike ${bikeNumber}`);
-            } catch (err: any) {
-                setError(`Erro ao recolher bike ${bikeNumber}: ${err.message}`);
-            } finally {
-                isUpdatingStateRef.current = false;
-                lastManualUpdateRef.current = Date.now();
-                processingBikesRef.current.delete(bikeNumber);
-                setProcessingBikes(new Set(processingBikesRef.current));
-            }
-            
-            return; 
-        }
+        setIsLoading(true);
 
         try {
-            // Se o status for "Não encontrada", loga diretamente no relatório e remove do roteiro via cache local
-            if (status === 'Não encontrada') {
-                setRouteBikes(prev => prev.filter(b => String(b) !== bikeNumber));
+            const userRef = doc(db, 'users', driverName);
+            const userSnap = await getDoc(userRef);
+            const userData = userSnap.data() || {};
 
-                const payload = { 
-                    action: 'finalizeRouteBike', 
-                    driverName, 
-                    bikeNumber, 
-                    finalStatus: 'Não encontrada', 
-                    finalObservation: '',
-                };
+            if (status === 'Recolhida') {
+                if (collectedBikes.includes(bikeNumber)) {
+                    alert(`Você já está em posse da bicicleta ${bikeNumber}.`);
+                    return;
+                }
+                
+                const newCollected = [...new Set([...(userData.collectedBikes || []), bikeNumber])];
+                const newRoute = (userData.routeBikes || []).filter((b: string) => String(b) !== bikeNumber);
+                
+                await setDoc(userRef, {
+                    collectedBikes: newCollected,
+                    routeBikes: newRoute,
+                    lastUpdate: serverTimestamp()
+                }, { merge: true });
 
-                syncService.queueAction(payload, 'finalizeRouteBike', `Não encontrada bike ${bikeNumber}`);
+                // Atualização Otimista
+                setCollectedBikes(newCollected);
+                setRouteBikes(newRoute);
+
+                // Atualiza status da bike no Firestore
+                await setDoc(doc(db, 'bikes', bikeNumber), {
+                    status: 'Recolhida',
+                    responsavel: driverName,
+                    ultimaAtualizacao: serverTimestamp()
+                }, { merge: true });
+
+                // Log no relatório (Firestore)
+                await addDoc(collection(db, 'reports'), {
+                    driverName,
+                    bikeNumber,
+                    status: 'Recolhida',
+                    timestamp: serverTimestamp(),
+                    observation: ''
+                });
+
+                setSuccessMessage(`Bicicleta ${bikeNumber} recolhida com sucesso!`);
+                setSearchedBike(null);
+                setSearchTerm('');
+            } else if (status === 'Não encontrada') {
+                const newRoute = (userData.routeBikes || []).filter((b: string) => String(b) !== bikeNumber);
+                await setDoc(userRef, { 
+                    routeBikes: newRoute,
+                    lastUpdate: serverTimestamp()
+                }, { merge: true });
+
+                // Atualização Otimista
+                setRouteBikes(newRoute);
+
+                // Atualiza status da bike no Firestore
+                await setDoc(doc(db, 'bikes', bikeNumber), {
+                    status: 'Não encontrada',
+                    responsavel: null,
+                    ultimaAtualizacao: serverTimestamp()
+                }, { merge: true });
+
+                await addDoc(collection(db, 'reports'), {
+                    driverName,
+                    bikeNumber,
+                    status: 'Não encontrada',
+                    timestamp: serverTimestamp(),
+                    observation: ''
+                });
+
+                setSuccessMessage(`Bicicleta ${bikeNumber} marcada como não encontrada.`);
+                setSearchedBike(null);
+                setSearchTerm('');
             }
         } catch (err: any) {
-            setError(err.message);
+            console.error("Erro ao atualizar status da bike:", err);
+            setError("Erro ao atualizar status no Firestore: " + err.message);
+            
+            // Fallback para Planilha
+            const payload = {
+                action: 'finalizeRouteBike',
+                driverName,
+                bikeNumber,
+                finalStatus: status,
+                finalObservation: '',
+            };
+            apiCall(payload, 0, true).catch(e => console.warn("Falha ao atualizar planilha (legado):", e));
         } finally {
             isUpdatingStateRef.current = false;
+            setIsLoading(false);
             lastManualUpdateRef.current = Date.now();
             processingBikesRef.current.delete(bikeNumber);
             setProcessingBikes(new Set(processingBikesRef.current));
@@ -887,6 +1252,39 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         return { text: formattedDate, color: color };
     };
 
+    const [isMigrating, setIsMigrating] = useState(false);
+    const [migrationMessage, setMigrationMessage] = useState<{ text: string, type: 'success' | 'error' | 'info' } | null>(null);
+
+    const handleMigrate = async () => {
+        setMigrationMessage({ text: 'Autenticando com o Google para migração...', type: 'info' });
+        setIsMigrating(true);
+        try {
+            // 1. Garante que o usuário está autenticado no Firebase com o Google
+            if (!auth.currentUser) {
+                const provider = new GoogleAuthProvider();
+                await signInWithPopup(auth, provider);
+            }
+
+            console.log('Autenticado no Firebase como:', auth.currentUser?.email, 'UID:', auth.currentUser?.uid);
+            setMigrationMessage({ text: 'Iniciando migração de dados...', type: 'info' });
+            
+            // 2. Executa a migração
+            const result = await migrateDataToFirebase(category);
+            if (result.success) {
+                setMigrationMessage({ text: 'Migração concluída com sucesso! Agora o sistema está pronto para usar o Firebase.', type: 'success' });
+            } else {
+                setMigrationMessage({ text: 'Erro na migração: ' + result.error, type: 'error' });
+            }
+        } catch (err: any) {
+            console.error('Erro na migração:', err);
+            setMigrationMessage({ text: 'Erro inesperado na migração: ' + (err.message || 'Falha na autenticação ou permissão'), type: 'error' });
+        } finally {
+            setIsMigrating(false);
+            // Limpa a mensagem após 10 segundos
+            setTimeout(() => setMigrationMessage(null), 10000);
+        }
+    };
+
     const handleSearch = async (bikeToSearch?: string) => {
         const term = (bikeToSearch || searchTerm).trim();
         
@@ -954,36 +1352,52 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
 
     const handleNaoAtendidaClick = async (bikeNumberInput: string | number, silent = false) => {
         const bikeNumber = String(bikeNumberInput);
-        // Salva o estado original para rollback
-        const originalRouteBikes = [...routeBikes];
         isUpdatingStateRef.current = true;
         if (!silent) setIsLoading(true);
 
-        // ATUALIZAÇÃO OTIMISTA: Remove a bike da rota na UI imediatamente
-        const newRouteBikes = routeBikes.filter(b => String(b) !== bikeNumber);
-        setRouteBikes(newRouteBikes);
-
-        // Tenta sincronizar com o backend em segundo plano
         try {
-            const result = await apiCall({ 
+            const userRef = doc(db, 'users', driverName);
+            const userSnap = await getDoc(userRef);
+            const userData = userSnap.data() || {};
+            
+            const newRoute = (userData.routeBikes || []).filter((b: string) => String(b) !== bikeNumber);
+            await setDoc(userRef, { 
+                routeBikes: newRoute,
+                lastUpdate: serverTimestamp()
+            }, { merge: true });
+
+            // Atualização Otimista
+            setRouteBikes(newRoute);
+
+            // Atualiza status da bike no Firestore
+            await setDoc(doc(db, 'bikes', bikeNumber), {
+                status: 'Pendente',
+                responsavel: null,
+                ultimaAtualizacao: serverTimestamp()
+            }, { merge: true });
+
+            await addDoc(collection(db, 'reports'), {
+                driverName,
+                bikeNumber,
+                status: 'Não atendida',
+                timestamp: serverTimestamp(),
+                observation: ''
+            });
+
+            if (!silent) setSuccessMessage(`Bicicleta ${bikeNumber} marcada como não atendida.`);
+        } catch (err: any) {
+            console.error("Erro ao marcar como não atendida:", err);
+            if (!silent) setError(`Falha ao processar "Não atendida" para a bike ${bikeNumber}.`);
+            
+            // Fallback para Planilha
+            const payload = { 
                 action: 'finalizeRouteBike', 
                 driverName, 
                 bikeNumber, 
                 finalStatus: 'Não atendida', 
                 finalObservation: '',
-            });
-
-            if (!result.success) throw new Error(result.error || 'Falha ao registrar no relatório.');
-
-            // Força uma atualização após um pequeno delay
-            setTimeout(() => refreshAll(true), 2000);
-        } catch (err: any) {
-            // ROLLBACK: Se qualquer chamada falhar, restaura o estado original
-            if (!silent) {
-                setError(`Falha ao processar "Não atendida" para a bike ${bikeNumber}. Restaurando.`);
-            }
-            setRouteBikes(originalRouteBikes);
-            if (silent) throw err; // Repassa o erro se estiver no modo silencioso
+            };
+            apiCall(payload, 0, true).catch(e => console.warn("Falha ao atualizar planilha (legado):", e));
         } finally {
             isUpdatingStateRef.current = false;
             lastManualUpdateRef.current = Date.now();
@@ -1069,7 +1483,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         }
     };
 
-    const executeCollectedBikeAction = (bikeNumberInput: string | number, status: string, observation: string) => {
+    const executeCollectedBikeAction = async (bikeNumberInput: string | number, status: string, observation: string) => {
         const bikeNumber = String(bikeNumberInput);
         if (processingBikesRef.current.has(bikeNumber)) return;
         
@@ -1084,6 +1498,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         isUpdatingStateRef.current = true;
         processingBikesRef.current.add(bikeNumber);
         setProcessingBikes(new Set(processingBikesRef.current));
+        setIsLoading(true);
         
         // ATUALIZAÇÃO OTIMISTA: Remove a bike da lista na UI imediatamente
         setCollectedBikes(prev => prev.filter(b => String(b) !== bikeNumber));
@@ -1103,6 +1518,35 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 finalObservation = observation; 
             }
 
+            // 1. Atualiza no Firestore (Novo padrão)
+            const userRef = doc(db, 'users', driverName);
+            const userSnap = await getDoc(userRef);
+            const userData = userSnap.data() || {};
+            const newCollected = (userData.collectedBikes || []).filter((b: string) => String(b) !== bikeNumber);
+            
+            await setDoc(userRef, { 
+                collectedBikes: newCollected,
+                lastUpdate: serverTimestamp()
+            }, { merge: true });
+
+            // 2. Atualiza status da bike no Firestore
+            await setDoc(doc(db, 'bikes', bikeNumber), {
+                status: finalStatus,
+                responsavel: null,
+                observacao: finalObservation,
+                ultimaAtualizacao: serverTimestamp()
+            }, { merge: true });
+
+            // 3. Adiciona relatório no Firestore
+            await addDoc(collection(db, 'reports'), {
+                driverName,
+                bikeNumber,
+                status: finalStatus,
+                observation: finalObservation,
+                timestamp: serverTimestamp()
+            });
+
+            // 4. Mantém o legado via Planilha
             const payload = { 
                 action: 'finalizeCollectedBike', 
                 driverName, 
@@ -1111,11 +1555,14 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 finalObservation,
             };
 
-            syncService.queueAction(payload, 'finalizeCollectedBike', `${status} bike ${bikeNumber}`);
+            apiCall(payload, 0, true).catch(e => console.warn("Falha ao atualizar planilha (legado):", e));
+            setSuccessMessage(`Bicicleta ${bikeNumber} finalizada com sucesso!`);
         } catch (err: any) {
+            console.error(`Erro ao processar bike ${bikeNumber}:`, err);
             setError(`Erro ao processar bike ${bikeNumber}: ${err.message}`);
         } finally {
             isUpdatingStateRef.current = false;
+            setIsLoading(false);
             lastManualUpdateRef.current = Date.now();
             processingBikesRef.current.delete(bikeNumber);
             setProcessingBikes(new Set(processingBikesRef.current));
@@ -1220,54 +1667,19 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
             if (d.requests) setPendingRequests(d.requests);
             
             // 2. Driver State
-            if (d.driverState && !isUpdatingStateRef.current) {
-                const pendingActions = syncService.getPendingActions();
-                
-                // Bikes sendo removidas do roteiro
-                const pendingRouteRemovals = new Set(
-                    pendingActions
-                        .filter(a => a.actionName === 'finalizeRouteBike')
-                        .map(a => String(a.payload.bikeNumber))
-                );
+            // OTIMIZAÇÃO: Só atualiza o estado do motorista se não houver um update manual recente (15s)
+            // ou se o Firestore não tiver enviado dados recentemente (30s).
+            // Isso evita o flicker causado por dados atrasados da Planilha sobrescrevendo o Firestore/Local.
+            const hasRecentManualUpdate = Date.now() - lastManualUpdateRef.current < 15000;
+            const hasRecentFirestoreUpdate = Date.now() - lastFirestoreUpdateRef.current < 30000;
 
-                // Bikes sendo adicionadas ao roteiro (de acceptRequest se não for carretinha)
-                const pendingRouteAdditions = new Set<string>();
-                pendingActions
-                    .filter(a => a.actionName === 'acceptRequest' && !a.payload.isTrailer)
-                    .forEach(a => {
-                        const bikes = String(a.payload.bikeNumbers || '').split(',').map(s => s.trim()).filter(Boolean);
-                        bikes.forEach(b => pendingRouteAdditions.add(b));
-                    });
-
-                // Bikes sendo removidas da posse
-                const pendingCollectedRemovals = new Set(
-                    pendingActions
-                        .filter(a => a.actionName === 'finalizeCollectedBike')
-                        .map(a => String(a.payload.bikeNumber))
-                );
-
-                // Bikes sendo adicionadas à posse (de acceptRequest se carretinha, ou finalizeRouteBike se status for Recolhida)
-                const pendingCollectedAdditions = new Set<string>();
-                pendingActions
-                    .filter(a => a.actionName === 'acceptRequest' && a.payload.isTrailer)
-                    .forEach(a => {
-                        const bikes = String(a.payload.bikeNumbers || '').split(',').map(s => s.trim()).filter(Boolean);
-                        bikes.forEach(b => pendingCollectedAdditions.add(b));
-                    });
-                
-                pendingActions
-                    .filter(a => a.actionName === 'finalizeRouteBike' && a.payload.finalStatus === 'Recolhida')
-                    .forEach(a => pendingCollectedAdditions.add(String(a.payload.bikeNumber)));
-
+            if (d.driverState && !isUpdatingStateRef.current && !hasRecentManualUpdate && !hasRecentFirestoreUpdate) {
                 const serverCollected = [...new Set((d.driverState.collectedBikes || []).map(b => String(b)))];
                 const serverRoute = [...new Set((d.driverState.routeBikes || []).map(b => String(b)))].filter(b => !serverCollected.includes(b));
                 
-                // Aplica lógica de pendentes aos dados do servidor
-                const finalRoute = serverRoute.filter(b => !pendingRouteRemovals.has(b) && !processingBikesRef.current.has(b));
-                pendingRouteAdditions.forEach(b => { if (!finalRoute.includes(b)) finalRoute.push(b); });
-
-                const finalCollected = serverCollected.filter(b => !pendingCollectedRemovals.has(b) && !processingBikesRef.current.has(b));
-                pendingCollectedAdditions.forEach(b => { if (!finalCollected.includes(b)) finalCollected.push(b); });
+                // Aplica lógica de processamento aos dados do servidor
+                const finalRoute = serverRoute.filter(b => !processingBikesRef.current.has(b));
+                const finalCollected = serverCollected.filter(b => !processingBikesRef.current.has(b));
 
                 setRouteBikes(finalRoute);
                 setCollectedBikes(finalCollected);
@@ -1332,13 +1744,14 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
         };
 
         try {
+            setSyncError(null);
             const result = await apiCall({ 
                 action: 'sync', 
                 driverName, 
                 category, 
                 summaryTimeRange, 
                 statusTimeRange 
-            }, 2);
+            }, 2, true);
 
             if (result.success && result.data) {
                 applyData(result.data);
@@ -1346,15 +1759,17 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 if (result.version) setBackendVersion(result.version);
                 setLastSyncTime(new Date().toLocaleTimeString());
             } else {
-                setError(result.error || 'Falha na sincronização de dados.');
+                setSyncError(result.error || 'Falha na sincronização de dados.');
             }
         } catch (err: any) {
-            console.error("Erro ao atualizar dados:", err);
+            console.error("Erro ao atualizar dados (legado):", err);
+            setSyncError(err.message || 'Erro de conexão com o servidor legado.');
+            
             const cached = localStorage.getItem('cached_main_data');
             if (cached) {
                 try {
                     applyData(JSON.parse(cached));
-                    console.log("Dados carregados do cache local.");
+                    console.log("Dados carregados do cache local devido a falha na API.");
                 } catch (e) {
                     console.error("Erro ao parsear cache:", e);
                 }
@@ -1463,11 +1878,21 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 if (shouldUpdate) {
                     lastLocationUpdateRef.current = now;
                     lastLocationRef.current = { lat: latitude, lng: longitude };
+                    
+                    // Atualiza no Firestore para o mapa em tempo real
+                    const userRef = doc(db, 'users', driverName);
+                    setDoc(userRef, {
+                        currentLat: latitude,
+                        currentLng: longitude,
+                        lastLocationUpdate: serverTimestamp(),
+                        category: category // Garante que a categoria esteja atualizada para o filtro do mapa
+                    }, { merge: true }).catch(err => console.error("Erro ao atualizar localização no Firestore:", err));
+
                     apiGetCall('updateLocation', {
                         driverName,
                         latitude: latitude.toFixed(6),
                         longitude: longitude.toFixed(6)
-                    }).catch(err => console.error("Falha ao atualizar a localização:", err));
+                    }).catch(err => console.error("Falha ao atualizar a localização no Sheets:", err));
                 }
             },
             (err) => {
@@ -1577,20 +2002,49 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
 
     return (
         <div className="bg-white p-4 sm:p-6 rounded-xl shadow-lg w-full max-w-4xl mx-auto animate-fade-in-down">
+            {migrationMessage && (
+                <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-[10000] p-4 rounded-lg shadow-2xl border flex items-center gap-3 animate-bounce ${
+                    migrationMessage.type === 'success' ? 'bg-green-50 border-green-200 text-green-800' : 
+                    migrationMessage.type === 'error' ? 'bg-red-50 border-red-200 text-red-800' : 
+                    'bg-blue-50 border-blue-200 text-blue-800'
+                }`}>
+                    {migrationMessage.type === 'success' ? <CheckCircleIcon className="w-5 h-5" /> : 
+                     migrationMessage.type === 'error' ? <AlertTriangleIcon className="w-5 h-5" /> : 
+                     <RefreshIcon className="w-5 h-5 animate-spin" />}
+                    <p className="text-sm font-medium">{migrationMessage.text}</p>
+                    <button onClick={() => setMigrationMessage(null)} className="ml-2 text-current opacity-50 hover:opacity-100">
+                        <XIcon className="w-4 h-4" />
+                    </button>
+                </div>
+            )}
             <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 pb-4 border-b">
                 <div className="flex items-center gap-3">
                     <div>
                         <p className="font-bold text-base text-gray-800 leading-tight">{driverName}</p>
                         <div className="flex items-center gap-2">
                             <p className="text-xs text-gray-600 uppercase tracking-wider">{category}</p>
-                            <span className="text-[10px] text-gray-400 flex items-center gap-1">
-                                <span className={`w-1.5 h-1.5 rounded-full ${isSyncing ? 'bg-blue-500 animate-pulse' : 'bg-green-500'}`}></span>
-                                {lastSyncTime}
+                            <span 
+                                className={`text-[10px] flex items-center gap-1 cursor-help ${syncError ? 'text-red-500 font-bold' : 'text-gray-400'}`}
+                                title={syncError || 'Sincronização com planilha legada ativa'}
+                                onClick={() => syncError && alert(`Status da Planilha: ${syncError}`)}
+                            >
+                                <span className={`w-1.5 h-1.5 rounded-full ${isSyncing ? 'bg-blue-500 animate-pulse' : (syncError ? 'bg-red-500' : 'bg-green-500')}`}></span>
+                                {syncError ? 'Erro Planilha' : lastSyncTime}
                             </span>
                         </div>
                     </div>
                 </div>
                 <div className="flex items-center flex-wrap gap-1 mt-4 sm:mt-0">
+                    {category.includes('ADM') && (
+                        <button 
+                            onClick={handleMigrate} 
+                            disabled={isMigrating || isLoading} 
+                            title="Migrar para Firebase" 
+                            className={`p-1.5 sm:p-2 rounded-full transition-colors disabled:opacity-50 ${isMigrating ? 'text-orange-500 animate-spin' : 'text-gray-500 hover:bg-gray-100 hover:text-orange-600'}`}
+                        >
+                            <DatabaseIcon className="w-6 h-6 sm:w-7 sm:h-7" />
+                        </button>
+                    )}
                     {!isMecanica && (
                         <>
                             <button onClick={() => setRequestModalOpen(true)} disabled={isLoading} title="Nova Solicitação" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 transition-colors disabled:opacity-50">
@@ -1797,6 +2251,7 @@ const MainScreen: React.FC<MainScreenProps> = ({ driverName, category, plate, km
                 )}
 
                 {error && <div className="text-red-600 bg-red-100 p-3 rounded-md text-sm mb-4">{error}</div>}
+            {successMessage && <div className="text-green-600 bg-green-100 p-3 rounded-md text-sm mb-4">{successMessage}</div>}
 
                 {!category.includes('ADM') && searchedBike && (
                     <div className="p-4 border rounded-lg bg-green-50 animate-fade-in-down relative">

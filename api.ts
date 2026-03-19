@@ -5,8 +5,8 @@ const SCRIPT_URL = RAW_SCRIPT_URL.trim();
 // Helper para fetch com timeout, para evitar que a aplicação fique travada
 // esperando uma resposta do servidor por tempo indeterminado.
 async function fetchWithTimeout(resource: RequestInfo, options: RequestInit & { timeout?: number } = {}) {
-  // ATUALIZAÇÃO: Timeout padrão aumentado para 30 segundos para maior resiliência.
-  const { timeout = 30000 } = options; 
+  // ATUALIZAÇÃO: Timeout padrão aumentado para 60 segundos para maior resiliência.
+  const { timeout = 60000 } = options; 
   
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
@@ -87,7 +87,7 @@ export const apiGetCall = async (action: string, params: Record<string, string> 
       credentials: 'omit',
       cache: 'no-store',
       redirect: 'follow',
-      timeout: 30000,
+      timeout: 90000,
     });
 
     if (!response.ok) {
@@ -127,7 +127,7 @@ export const apiGetCall = async (action: string, params: Record<string, string> 
       throw new Error('A busca de dados demorou muito para responder (timeout).');
     }
     if (err.message.includes('Failed to fetch') || err.name === 'TypeError') {
-      throw new Error('Falha de comunicação com o servidor (Failed to fetch). Isso indica que o navegador bloqueou a requisição. CAUSA MAIS COMUM: O script não foi implantado com acesso para "Qualquer pessoa" (Anyone). Por favor, refaça a implantação no Google Apps Script selecionando "Quem pode acessar: Qualquer pessoa".');
+      throw new Error('Falha de comunicação com o servidor (Failed to fetch). Isso geralmente indica que o script não foi implantado corretamente. CERTIFIQUE-SE DE QUE: 1. O script está implantado como "App da Web". 2. "Quem pode acessar" está definido como "Qualquer pessoa" (Anyone). 3. Você usou a URL da "Implantação Executável" (/exec).');
     }
     throw err;
   }
@@ -183,8 +183,8 @@ export const apiCall = async (payload: any, retries = 1, silent = false): Promis
       },
       body: JSON.stringify(enrichedPayload),
       redirect: 'follow', // Essencial para seguir o redirecionamento do Google
-      // ATUALIZAÇÃO: Timeout aumentado para 60 segundos para operações que podem demorar mais.
-      timeout: 60000, 
+      // ATUALIZAÇÃO: Timeout aumentado para 90 segundos para operações que podem demorar mais.
+      timeout: 90000, 
     });
 
     if (!response.ok) {
@@ -250,11 +250,13 @@ export const apiCall = async (payload: any, retries = 1, silent = false): Promis
     }
 
     if (!silent) console.error(`Falha na chamada da API para ${SCRIPT_URL}. Payload: ${JSON.stringify(payload)}`, err);
+    else console.warn(`Falha silenciosa na chamada da API para ${SCRIPT_URL}.`);
+    
     if (err.name === 'AbortError' || err.message.includes('aborted')) {
       throw new Error('A operação demorou muito para ser concluída (timeout). Verifique sua conexão de rede ou a performance do servidor.');
     }
     if (err.message.includes('Failed to fetch') || err.name === 'TypeError') {
-      throw new Error('Falha de comunicação com o servidor (Failed to fetch). Isso indica que o navegador bloqueou a requisição. CAUSA MAIS COMUM: O script não foi implantado com acesso para "Qualquer pessoa" (Anyone). Por favor, refaça a implantação no Google Apps Script selecionando "Quem pode acessar: Qualquer pessoa".');
+      throw new Error('Falha de comunicação com o servidor (Failed to fetch). Isso geralmente indica que o script não foi implantado corretamente. CERTIFIQUE-SE DE QUE: 1. O script está implantado como "App da Web". 2. "Quem pode acessar" está definido como "Qualquer pessoa" (Anyone). 3. Você usou a URL da "Implantação Executável" (/exec).');
     }
     throw err;
   }

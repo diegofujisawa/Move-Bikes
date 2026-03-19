@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (request.auth.token.email == "diegofujisawajp@gmail.com");
+    }
+
+    function isUserAdmin() {
+      return isAdmin() || (isAuthenticated() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.category.toUpper().matches('.*ADM.*'));
+    }
+
+    function isValidBicycle(data) {
+      return data.patrimonio is string && data.patrimonio.size() > 0;
+    }
+
+    function isValidUser(data) {
+      return data.login is string && data.login.size() > 0;
+    }
+
+    function isValidRequest(data) {
+      return data.bikeNumber is string && data.bikeNumber.size() > 0;
+    }
+
+    function isValidReport(data) {
+      return data.driverName is string && data.driverName.size() > 0 &&
+             data.date is timestamp &&
+             data.type is string && data.type.size() > 0;
+    }
+
+    function isValidAlert(data) {
+      return data.bikeNumber is string && data.bikeNumber.size() > 0 &&
+             data.type is string && data.type.size() > 0 &&
+             data.status in ['Pendente', 'Encontrada'] &&
+             data.timestamp is timestamp;
+    }
+
+    match /bikes/{patrimonio} {
+      allow read: if isAuthenticated();
+      allow create, update: if isUserAdmin() || (isAuthenticated() && isValidBicycle(request.resource.data));
+      allow delete: if isUserAdmin();
+    }
+
+    match /users/{uid} {
+      allow read: if isAuthenticated();
+      allow create, update: if isUserAdmin() || (isAuthenticated() && request.auth.uid == uid && isValidUser(request.resource.data));
+      allow delete: if isUserAdmin();
+    }
+
+    match /requests/{id} {
+      allow read: if isAuthenticated();
+      allow create, update: if isUserAdmin() || (isAuthenticated() && isValidRequest(request.resource.data));
+      allow delete: if isUserAdmin();
+    }
+
+    match /reports/{id} {
+      allow read: if isAuthenticated();
+      allow create: if isUserAdmin() || (isAuthenticated() && isValidReport(request.resource.data));
+      allow update, delete: if isUserAdmin();
+    }
+
+    match /alerts/{id} {
+      allow read: if isAuthenticated();
+      allow create, update: if isUserAdmin() || (isAuthenticated() && isValidAlert(request.resource.data));
+      allow delete: if isUserAdmin();
+    }
+  }
+}

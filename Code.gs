@@ -154,7 +154,7 @@ function doGet(e) {
 }
 
 
-const BACKEND_VERSION = "76.0-vehicle-control";
+const BACKEND_VERSION = "77.0-firebase-migration";
 
 /**
  * Formata uma data para o padrão brasileiro (DD/MM/AAAA HH:mm:ss).
@@ -247,6 +247,7 @@ function doPost(e) {
       case 'getRouteDetails': response = { ...getRouteDetails(request.driverName, request.bikeNumbers), version: BACKEND_VERSION }; break;
       case 'switchVehicle': response = { ...switchVehicle(request.driverName, request.plate, request.kmInicial), version: BACKEND_VERSION }; break;
       case 'sync': response = { ...handleSync(request), version: BACKEND_VERSION }; break;
+      case 'exportAllData': response = { ...handleExportAllData(request), version: BACKEND_VERSION }; break;
       case 'saveDailySummary': response = { ...saveDailySummary(request.summaryData), version: BACKEND_VERSION }; break;
       case 'getAdminAlerts': response = { ...getAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
       case 'clearAdminAlerts': response = { ...clearAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
@@ -303,6 +304,50 @@ function logOperationToQueue(action, payload) {
  * Consolida múltiplas consultas em uma única chamada para reduzir a concorrência no Google Apps Script.
  * Isso ajuda a evitar o erro "Too many simultaneous invocations".
  */
+function handleExportAllData(payload) {
+  try {
+    if (!payload) return { success: false, error: 'Payload não fornecido.' };
+    const category = payload.category || '';
+    const isAdm = category.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, "").includes('ADM');
+    if (!isAdm) return { success: false, error: 'Acesso negado.' };
+    
+    const getAllData = (sheetName) => {
+      if (!sheetName) return [];
+      const sheet = ss.getSheetByName(sheetName);
+      if (!sheet) return [];
+      const data = sheet.getDataRange().getValues();
+      if (data.length < 2) return [];
+      const headers = data[0];
+      if (!headers || !Array.isArray(headers)) return [];
+      
+      return data.slice(1).map(row => {
+        const obj = {};
+        headers.forEach((header, index) => {
+          if (header) {
+            obj[header] = row[index];
+          }
+        });
+        return obj;
+      });
+    };
+
+    return {
+      success: true,
+      data: {
+        bikes: getAllData(BIKES_SHEET_NAME) || [],
+        users: getAllData(ACCESS_SHEET_NAME) || [],
+        requests: getAllData(REQUESTS_SHEET_NAME) || [],
+        reports: getAllData(REPORT_SHEET_NAME) || [],
+        alerts: getAllData(ALERTS_SHEET_NAME) || getAllData('Alertas') || [],
+        vandalized: getAllData(VANDALIZED_SHEET_NAME) || getAllData('Vandalizadas') || [],
+        stations: getAllData(STATIONS_SHEET_NAME) || []
+      }
+    };
+  } catch (e) {
+    return { success: false, error: "Erro ao exportar dados: " + e.message };
+  }
+}
+
 function handleSync(request) {
   const { driverName, category, summaryTimeRange, statusTimeRange } = request;
   const catUpper = (category || '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, "");
@@ -2467,13 +2512,15 @@ function getBikeStatuses(providedStateSheet, providedReportSheet) {
       const lastRow = reportSheet.getLastRow();
       if (lastRow > 1) {
         const numRows = Math.min(lastRow - 1, 300);
-        const lastCol = reportSheet.getLastColumn();
-        const reportData = reportSheet.getRange(lastRow - numRows + 1, 1, numRows, lastCol).getValues();
+        // OTIMIZAÇÃO: Lê apenas as colunas necessárias (1 a 6)
+        const reportData = reportSheet.getRange(lastRow - numRows + 1, 1, numRows, 6).getValues();
         
         for (let i = reportData.length - 1; i >= 0; i--) {
           const row = reportData[i];
-          const timestamp = new Date(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]).getTime();
-          const bike = row[COLUMN_INDICES.REPORTS.PATRIMONIO - 1].toString();
+          const tsRaw = row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1];
+          if (!tsRaw) continue;
+          const timestamp = new Date(tsRaw).getTime();
+          const bike = (row[COLUMN_INDICES.REPORTS.PATRIMONIO - 1] || '').toString();
           const status = (row[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().toUpperCase();
           const motorista = (row[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString();
           const systemStatus = (row[COLUMN_INDICES.REPORTS.STATUS_SISTEMA - 1] || '').toString().toUpperCase();
@@ -2591,20 +2638,20 @@ function getChangeStatusData(timeRange = '24h', providedSheets = null) {
     // 3. Calculate cutoff date and estimate rows to read
     const now = new Date();
     const cutoffDate = new Date();
-    let rowsToRead = 10000; 
+    let rowsToRead = 5000; 
 
     if (timeRange === '48h') {
-      cutoffDate.setDate(now.getDate() - 15);
-      rowsToRead = 30000;
+      cutoffDate.setDate(now.getDate() - 2);
+      rowsToRead = 8000;
     } else if (timeRange === '72h') {
-      cutoffDate.setDate(now.getDate() - 30);
-      rowsToRead = 60000;
+      cutoffDate.setDate(now.getDate() - 3);
+      rowsToRead = 12000;
     } else if (timeRange === 'week') {
-      cutoffDate.setDate(now.getDate() - 180);
-      rowsToRead = 200000;
-    } else {
       cutoffDate.setDate(now.getDate() - 7);
       rowsToRead = 20000;
+    } else {
+      cutoffDate.setDate(now.getDate() - 1);
+      rowsToRead = 5000;
     }
 
     // 4. Get report data (Limited rows)
@@ -2612,29 +2659,32 @@ function getChangeStatusData(timeRange = '24h', providedSheets = null) {
     if (lastRow < 2) return { success: true, data: { vandalizadas: [], filial: [] } };
     
     const actualRowsToRead = Math.min(lastRow - 1, rowsToRead);
-    const data = reportSheet.getRange(lastRow - actualRowsToRead + 1, 1, actualRowsToRead, reportSheet.getLastColumn()).getValues();
+    // OTIMIZAÇÃO: Lê apenas as colunas necessárias (1 a 6)
+    const data = reportSheet.getRange(lastRow - actualRowsToRead + 1, 1, actualRowsToRead, 6).getValues();
     
     // Track the MOST RECENT report for each bike
     const lastReports = {};
 
     data.forEach(row => {
       let timestampRaw = row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1];
-      let timestamp;
+      if (!timestampRaw) return;
       
+      let timestamp;
       if (timestampRaw instanceof Date) {
         timestamp = timestampRaw;
       } else {
-        if (typeof timestampRaw === 'string' && timestampRaw.includes('/')) {
-          const parts = timestampRaw.split(' ');
+        const tsStr = timestampRaw.toString();
+        if (tsStr.includes('/')) {
+          const parts = tsStr.split(' ');
           const dateParts = parts[0].split('/');
           if (dateParts.length === 3) {
             const isoDate = `${dateParts[2]}-${dateParts[1]}-${dateParts[0]}`;
             timestamp = new Date(isoDate + (parts[1] ? 'T' + parts[1] : ''));
           } else {
-            timestamp = new Date(timestampRaw);
+            timestamp = new Date(tsStr);
           }
         } else {
-          timestamp = new Date(timestampRaw);
+          timestamp = new Date(tsStr);
         }
       }
 
@@ -2946,49 +2996,52 @@ function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameF
     }
     
     const stats = {};
+    const driverLookup = {};
     drivers.forEach(d => {
+      const normalized = d.toLowerCase();
       stats[d] = { recolhidas: 0, remanejada: 0, naoEncontrada: 0, naoAtendida: 0 };
+      driverLookup[normalized] = d;
     });
 
     reportsData.forEach(row => {
       let timestampRaw = row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1];
-      let timestamp;
+      if (!timestampRaw) return;
       
+      let timestamp;
       if (timestampRaw instanceof Date) {
         timestamp = timestampRaw;
       } else {
-        if (typeof timestampRaw === 'string' && timestampRaw.includes('/')) {
-          const parts = timestampRaw.split(' ');
+        const tsStr = timestampRaw.toString();
+        if (tsStr.includes('/')) {
+          const parts = tsStr.split(' ');
           const dateParts = parts[0].split('/');
           if (dateParts.length === 3) {
             const isoDate = `${dateParts[2]}-${dateParts[1]}-${dateParts[0]}`;
             timestamp = new Date(isoDate + (parts[1] ? 'T' + parts[1] : ''));
           } else {
-            timestamp = new Date(timestampRaw);
+            timestamp = new Date(tsStr);
           }
         } else {
-          timestamp = new Date(timestampRaw);
+          timestamp = new Date(tsStr);
         }
       }
 
       if (isNaN(timestamp.getTime())) return;
 
       if (timestamp >= filterDate && timestamp <= endDate) {
-        const driver = (row[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
-        const status = (row[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim();
-        const statusLower = status.toLowerCase();
-        
-        // Busca a chave do motorista ignorando case
-        const driverKey = Object.keys(stats).find(k => k.toLowerCase() === driver.toLowerCase());
+        const driverRaw = (row[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
+        const driverKey = driverLookup[driverRaw.toLowerCase()];
 
         if (driverKey) {
-          if (statusLower.includes('filial') || statusLower.includes('recolhida') || statusLower === 'vandalizada') {
+          const status = (row[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim().toLowerCase();
+          
+          if (status.includes('filial') || status.includes('recolhida') || status === 'vandalizada') {
             stats[driverKey].recolhidas++;
-          } else if (statusLower === 'estação' || statusLower === 'estacao') {
+          } else if (status === 'estação' || status === 'estacao') {
             stats[driverKey].remanejada++;
-          } else if (statusLower === 'não encontrada' || statusLower === 'nao encontrada') {
+          } else if (status === 'não encontrada' || status === 'nao encontrada') {
             stats[driverKey].naoEncontrada++;
-          } else if (statusLower === 'não atendida' || statusLower === 'nao atendida') {
+          } else if (status === 'não atendida' || status === 'nao atendida') {
             stats[driverKey].naoAtendida++;
           }
         }

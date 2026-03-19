@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { LogoutIcon, MapIcon, XIcon, MovingIcon } from './icons';
 import { DriverLocation } from '../types';
-import { apiGetCall } from '../api';
+import { db } from '../firebase';
+import { collection, onSnapshot, query } from 'firebase/firestore';
 import L from 'leaflet';
 
 // Fix for default marker icons in Leaflet
@@ -33,120 +34,123 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
   const markersRef = useRef<{ [key: string]: L.Marker }>({});
   const hasCenteredRef = useRef(false);
   
-  const fetchLocationsAndUpdateMap = useCallback(async () => {
-    try {
-      const result = await apiGetCall('getDriverLocations');
-      const locations = (result.data || []) as DriverLocation[];
-      setError(null);
-      
-      if (!mapContainerRef.current) return;
+  const updateMapWithLocations = useCallback((locations: DriverLocation[]) => {
+    if (!mapContainerRef.current) return;
 
-      // Inicializa o mapa apenas uma vez usando Leaflet (GRATUITO)
-      if (!mapRef.current) {
-          const map = L.map(mapContainerRef.current, {
-              center: [-23.1791, -45.8872], // Coordenadas do centro de São José dos Campos
-              zoom: 12,
-              zoomControl: true,
-              attributionControl: true
-          });
+    // Inicializa o mapa apenas uma vez usando Leaflet (GRATUITO)
+    if (!mapRef.current) {
+        const map = L.map(mapContainerRef.current, {
+            center: [-23.1791, -45.8872], // Coordenadas do centro de São José dos Campos
+            zoom: 12,
+            zoomControl: true,
+            attributionControl: true
+        });
 
-          // Adiciona os tiles do OpenStreetMap (Gratuito e sem limite de uso)
-          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-              attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-          }).addTo(map);
+        // Adiciona os tiles do OpenStreetMap (Gratuito e sem limite de uso)
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
 
-          mapRef.current = map;
-      }
+        mapRef.current = map;
+    }
 
-      if (mapRef.current) {
-          const map = mapRef.current;
-          const currentMarkers = markersRef.current;
-          const activeDrivers = new Set<string>();
-          const markerGroup: L.LatLng[] = [];
+    if (mapRef.current) {
+        const map = mapRef.current;
+        const currentMarkers = markersRef.current;
+        const activeDrivers = new Set<string>();
+        const markerGroup: L.LatLng[] = [];
 
-          locations.forEach(loc => {
-              const { driverName, latitude, longitude } = loc;
-              const normLat = normalizeCoord(latitude);
-              const normLng = normalizeCoord(longitude);
-              
-              if (isNaN(normLat) || isNaN(normLng)) return;
+        locations.forEach(loc => {
+            const { driverName, latitude, longitude } = loc;
+            const normLat = normalizeCoord(latitude);
+            const normLng = normalizeCoord(longitude);
+            
+            if (isNaN(normLat) || isNaN(normLng) || normLat === 0 || normLng === 0) return;
 
-              const position = L.latLng(normLat, normLng);
-              activeDrivers.add(driverName);
-              markerGroup.push(position);
+            const position = L.latLng(normLat, normLng);
+            activeDrivers.add(driverName);
+            markerGroup.push(position);
 
-              if (currentMarkers[driverName]) {
-                  currentMarkers[driverName].setLatLng(position);
-              } else {
-                  const marker = L.marker(position, {
-                      title: driverName,
-                  }).addTo(map);
+            if (currentMarkers[driverName]) {
+                currentMarkers[driverName].setLatLng(position);
+            } else {
+                const marker = L.marker(position, {
+                    title: driverName,
+                }).addTo(map);
 
-                  marker.bindTooltip(driverName, { 
-                      permanent: true, 
-                      direction: 'top',
-                      className: 'bg-blue-600 text-white font-bold px-2 py-1 rounded shadow-lg border-none'
-                  });
+                marker.bindTooltip(driverName, { 
+                    permanent: true, 
+                    direction: 'top',
+                    className: 'bg-blue-600 text-white font-bold px-2 py-1 rounded shadow-lg border-none'
+                });
 
-                  currentMarkers[driverName] = marker;
-              }
-          });
+                currentMarkers[driverName] = marker;
+            }
+        });
 
-          // Centraliza automaticamente na primeira vez que houver motoristas
-          if (markerGroup.length > 0 && !hasCenteredRef.current) {
-              const bounds = L.latLngBounds(markerGroup);
-              map.fitBounds(bounds, { padding: [70, 70] });
-              hasCenteredRef.current = true;
-          }
+        // Centraliza automaticamente na primeira vez que houver motoristas
+        if (markerGroup.length > 0 && !hasCenteredRef.current) {
+            const bounds = L.latLngBounds(markerGroup);
+            map.fitBounds(bounds, { padding: [70, 70] });
+            hasCenteredRef.current = true;
+        }
 
-          Object.keys(currentMarkers).forEach(driverName => {
-              if (!activeDrivers.has(driverName)) {
-                  map.removeLayer(currentMarkers[driverName]);
-                  delete currentMarkers[driverName];
-              }
-          });
-      }
-
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ocorreu um erro ao buscar localizações.');
+        Object.keys(currentMarkers).forEach(driverName => {
+            if (!activeDrivers.has(driverName)) {
+                map.removeLayer(currentMarkers[driverName]);
+                delete currentMarkers[driverName];
+            }
+        });
     }
   }, []);
 
-  const handleRecenter = () => {
-      if (mapRef.current) {
-          const markers = Object.values(markersRef.current);
-          if (markers.length > 0) {
-              const group = markers.map(m => m.getLatLng());
-              const bounds = L.latLngBounds(group);
-              mapRef.current.fitBounds(bounds, { padding: [70, 70] });
-          }
+  const handleRecenter = useCallback(() => {
+    if (mapRef.current && markersRef.current) {
+      const markerGroup: L.LatLng[] = Object.values(markersRef.current).map(m => m.getLatLng());
+      if (markerGroup.length > 0) {
+        const bounds = L.latLngBounds(markerGroup);
+        mapRef.current.fitBounds(bounds, { padding: [70, 70] });
       }
-  };
+    }
+  }, []);
 
   useEffect(() => {
-    let isMounted = true;
+    setIsLoading(true);
     
-    const runProcess = async () => {
-      await fetchLocationsAndUpdateMap();
-      if (isMounted) {
-        setIsLoading(false);
-      }
-    };
-
-    runProcess();
-    
-    const intervalId = setInterval(fetchLocationsAndUpdateMap, 10000);
+    // Escuta a coleção de usuários no Firestore para obter localizações em tempo real
+    const q = query(collection(db, 'users'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const locations: DriverLocation[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        if (data.gps && data.gps.lat && data.gps.lng) {
+          locations.push({
+            driverName: data.login || doc.id,
+            latitude: data.gps.lat,
+            longitude: data.gps.lng,
+            timestamp: data.gps.timestamp || ''
+          });
+        }
+      });
+      
+      updateMapWithLocations(locations);
+      setIsLoading(false);
+      setError(null);
+    }, (err) => {
+      console.error("Erro ao escutar localizações:", err);
+      setError("Erro ao conectar com o banco de dados em tempo real.");
+      setIsLoading(false);
+    });
 
     return () => {
-      isMounted = false;
-      clearInterval(intervalId);
+      unsubscribe();
       if (mapRef.current) {
           mapRef.current.remove();
           mapRef.current = null;
       }
       markersRef.current = {};
     };
-  }, [fetchLocationsAndUpdateMap]);
+  }, [updateMapWithLocations]);
 
   return (
     <div className="bg-white p-6 rounded-xl shadow-lg w-full h-full flex flex-col">
