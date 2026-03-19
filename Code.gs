@@ -1714,15 +1714,24 @@ function syncWithRequests(patrimonio, status, observacao, motorista) {
 // (checkDivergences movido para Trigger periódico via runPeriodicMaintenance)
 // =================================================================
 function checkAllDivergences() {
-  // Chamado pelo Trigger periódico — processa últimas 100 linhas do relatório
   const reportSheet = getSpreadsheet().getSheetByName(REPORT_SHEET_NAME);
   if (!reportSheet) return;
   const lastRow = reportSheet.getLastRow();
   if (lastRow < 2) return;
-  const numRows = Math.min(lastRow - 1, 100);
+
+  // Processa apenas os últimos registros — evita reprocessar histórico inteiro
+  const numRows = Math.min(lastRow - 1, 50);
   const data = reportSheet.getRange(lastRow - numRows + 1, 1, numRows, reportSheet.getLastColumn()).getValues();
+  const now = new Date();
+  const TWO_HOURS = 2 * 60 * 60 * 1000;
+
   data.forEach(row => {
-    try { checkDivergences(row); } catch (e) {}
+    try {
+      // Só processa registros das últimas 2 horas
+      const ts = new Date(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
+      if (isNaN(ts.getTime()) || (now - ts) > TWO_HOURS) return;
+      checkDivergences(row);
+    } catch (e) {}
   });
 }
 
@@ -1790,7 +1799,7 @@ function batchAddNotifications(notificationsMap) {
     } else {
       let current = [];
       try { current = JSON.parse(sheet.getRange(rowIndex, COLUMN_INDICES.NOTIFICATIONS.JSON).getValue() || '[]'); } catch (e) {}
-      const isDuplicate = current.some(n => n.msg === message && (new Date() - new Date(n.time)) < 60000);
+      const isDuplicate = current.some(n => n.msg === message && (new Date() - new Date(n.time)) < 6 * 60 * 60 * 1000);
       if (!isDuplicate) {
         current.unshift(notification);
         if (current.length > 50) current = current.slice(0, 50);
@@ -1808,7 +1817,58 @@ function logDivergence(driverName, patrimonio, message) {
     sheet.getRange(1, 1, 1, 4).setFontWeight('bold').setBackground('#f3f3f3');
     sheet.setFrozenRows(1);
   }
-  sheet.appendRow([new Date(), driverName, patrimonio, message]);
+
+  const now = new Date();
+  const SIX_HOURS = 6 * 60 * 60 * 1000;
+
+  // Verifica se algum ADM confirmou leitura após a última ocorrência desta divergência
+  // Se sim, não recria — a divergência foi lida e confirmada
+  const props = PropertiesService.getScriptProperties().getProperties();
+  for (const key of Object.keys(props)) {
+    if (key.startsWith('lastClearAlert_')) {
+      const clearTime = new Date(props[key]);
+      if (!isNaN(clearTime.getTime()) && (now - clearTime) < SIX_HOURS) {
+        // Um ADM limpou os alertas nas últimas 6h
+        // Só recria se a divergência for mais recente que a limpeza
+        // Verifica se já existe esta divergência após a limpeza
+        const lastRow = sheet.getLastRow();
+        if (lastRow > 1) {
+          const numCheck = Math.min(lastRow - 1, 50);
+          const data = sheet.getRange(lastRow - numCheck + 1, 1, numCheck, 4).getValues();
+          for (let i = data.length - 1; i >= 0; i--) {
+            const rowDate = new Date(data[i][0]);
+            if (isNaN(rowDate.getTime())) continue;
+            if (rowDate < clearTime) break; // anterior à limpeza — para
+            if ((data[i][1] || '').toString() === driverName &&
+                (data[i][2] || '').toString() === patrimonio.toString() &&
+                (data[i][3] || '').toString() === message) {
+              return; // já existe após a limpeza — não duplica
+            }
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  // Previne duplicatas nas últimas 6 horas
+  const lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    const numCheck = Math.min(lastRow - 1, 200);
+    const data = sheet.getRange(lastRow - numCheck + 1, 1, numCheck, 4).getValues();
+    for (let i = data.length - 1; i >= 0; i--) {
+      const rowDate = new Date(data[i][0]);
+      if (isNaN(rowDate.getTime())) continue;
+      if (now - rowDate > SIX_HOURS) break;
+      if ((data[i][1] || '').toString() === driverName &&
+          (data[i][2] || '').toString() === patrimonio.toString() &&
+          (data[i][3] || '').toString() === message) {
+        return; // já existe nas últimas 6h — não duplica
+      }
+    }
+  }
+
+  sheet.appendRow([now, driverName, patrimonio, message]);
 }
 
 function getAdminAlerts(adminName) {
@@ -1831,17 +1891,36 @@ function getAdminAlerts(adminName) {
 
 function clearAdminAlerts(adminName) {
   try {
+    // 1. Limpa as notificações do usuário na aba Notificacoes
     const sheet = getSpreadsheet().getSheetByName(NOTIFICATIONS_SHEET_NAME);
-    if (!sheet) return { success: true };
-    const data = sheet.getDataRange().getValues();
-    const adminLower = (adminName || '').toString().trim().toLowerCase();
-    for (let i = 1; i < data.length; i++) {
-      if ((data[i][0] || '').toString().trim().toLowerCase() === adminLower) {
-        sheet.getRange(i + 1, COLUMN_INDICES.NOTIFICATIONS.JSON).setValue('[]');
-        SpreadsheetApp.flush();
-        return { success: true };
+    if (sheet) {
+      const data = sheet.getDataRange().getValues();
+      const adminLower = (adminName || '').toString().trim().toLowerCase();
+      for (let i = 1; i < data.length; i++) {
+        if ((data[i][0] || '').toString().trim().toLowerCase() === adminLower) {
+          sheet.getRange(i + 1, COLUMN_INDICES.NOTIFICATIONS.JSON).setValue('[]');
+          SpreadsheetApp.flush();
+          break;
+        }
       }
     }
+
+    // 2. Marca as divergências existentes como lidas
+    // Adiciona uma linha marcadora na aba Divergencia com timestamp de leitura
+    // O checkDivergences vai checar se há uma leitura mais recente que a divergência
+    let divSheet = getSpreadsheet().getSheetByName(DIVERGENCE_SHEET_NAME);
+    if (!divSheet) {
+      divSheet = getSpreadsheet().insertSheet(DIVERGENCE_SHEET_NAME);
+      divSheet.appendRow(['Data/Hora', 'Motorista', 'Patrimônio', 'Mensagem']);
+      divSheet.getRange(1, 1, 1, 4).setFontWeight('bold').setBackground('#f3f3f3');
+      divSheet.setFrozenRows(1);
+    }
+
+    // Registra timestamp de leitura — o logDivergence vai verificar isso
+    // antes de recriar divergências antigas
+    const propKey = 'lastClearAlert_' + (adminName || '').toString().trim();
+    PropertiesService.getScriptProperties().setProperty(propKey, new Date().toISOString());
+
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };

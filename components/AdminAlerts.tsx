@@ -24,16 +24,8 @@ const AdminAlerts: React.FC<AdminAlertsProps> = ({ adminName, isOpen, onClose })
         try {
             const response = await apiCall({ action: 'getAdminAlerts', adminName });
             if (response.success) {
-                const fetchedAlerts = response.alerts || [];
-                setAlerts(fetchedAlerts);
-                
-                // Se houver alertas, vamos limpá-los no servidor pois o usuário já os viu (abriu o modal)
-                if (fetchedAlerts.length > 0) {
-                    // Limpa no servidor de forma silenciosa
-                    apiCall({ action: 'clearAdminAlerts', adminName }, 0, true).catch(err => {
-                        console.error("Erro ao limpar alertas automaticamente:", err);
-                    });
-                }
+                setAlerts(response.alerts || []);
+                // NÃO limpa automaticamente — ADM precisa clicar no lixo para confirmar leitura
             }
         } catch (error) {
             console.error("Erro ao buscar alertas:", error);
@@ -44,8 +36,8 @@ const AdminAlerts: React.FC<AdminAlertsProps> = ({ adminName, isOpen, onClose })
 
     const clearAlerts = async () => {
         if (!adminName) return;
-        if (!confirm("Deseja limpar todos os alertas?")) return;
-        
+        if (!confirm("Confirmar leitura de todos os alertas? Eles não aparecerão novamente.")) return;
+
         setIsLoading(true);
         try {
             const response = await apiCall({ action: 'clearAdminAlerts', adminName });
@@ -62,7 +54,7 @@ const AdminAlerts: React.FC<AdminAlertsProps> = ({ adminName, isOpen, onClose })
     useEffect(() => {
         if (isOpen) {
             fetchAlerts();
-            // Poll every 10 seconds while open (increased from 3s)
+            // Atualiza a cada 10 segundos enquanto o modal estiver aberto
             const interval = setInterval(fetchAlerts, 10000);
             return () => clearInterval(interval);
         }
@@ -76,14 +68,22 @@ const AdminAlerts: React.FC<AdminAlertsProps> = ({ adminName, isOpen, onClose })
                 <div className="p-4 border-b flex items-center justify-between bg-red-50">
                     <div className="flex items-center gap-2 text-red-700">
                         <AlertTriangleIcon className="w-6 h-6" />
-                        <h2 className="text-lg font-bold">Alertas e Notificações</h2>
+                        <div>
+                            <h2 className="text-lg font-bold">Alertas e Notificações</h2>
+                            {alerts.length > 0 && (
+                                <p className="text-xs text-red-500 font-normal">
+                                    {alerts.length} alerta{alerts.length > 1 ? 's' : ''} — clique no lixo para confirmar leitura
+                                </p>
+                            )}
+                        </div>
                     </div>
                     <div className="flex items-center gap-2">
                         {alerts.length > 0 && (
-                            <button 
+                            <button
                                 onClick={clearAlerts}
-                                className="p-2 text-gray-500 hover:text-red-600 transition-colors"
-                                title="Limpar tudo"
+                                disabled={isLoading}
+                                className="p-2 text-gray-500 hover:text-red-600 transition-colors disabled:opacity-50"
+                                title="Confirmar leitura de todos os alertas"
                             >
                                 <TrashIcon className="w-5 h-5" />
                             </button>
@@ -105,13 +105,16 @@ const AdminAlerts: React.FC<AdminAlertsProps> = ({ adminName, isOpen, onClose })
                         </div>
                     ) : (
                         alerts.map((alert) => (
-                            <div 
-                                key={alert.id} 
-                                className="p-2 bg-red-50 border-l-4 border-red-500 rounded-r-lg shadow-sm animate-in fade-in slide-in-from-top-2 duration-300"
+                            <div
+                                key={alert.id}
+                                className="p-3 bg-red-50 border-l-4 border-red-500 rounded-r-lg shadow-sm"
                             >
                                 <p className="text-red-900 font-medium text-xs leading-tight">{alert.msg}</p>
                                 <p className="text-[10px] text-red-400 mt-1">
-                                    {new Date(alert.time).toLocaleString('pt-BR', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}
+                                    {new Date(alert.time).toLocaleString('pt-BR', {
+                                        hour: '2-digit', minute: '2-digit',
+                                        day: '2-digit', month: '2-digit'
+                                    })}
                                 </p>
                             </div>
                         ))
@@ -119,7 +122,7 @@ const AdminAlerts: React.FC<AdminAlertsProps> = ({ adminName, isOpen, onClose })
                 </div>
 
                 <div className="p-4 border-t bg-gray-50 flex justify-end">
-                    <button 
+                    <button
                         onClick={onClose}
                         className="px-6 py-2 bg-white border border-gray-300 rounded-xl text-gray-700 font-medium hover:bg-gray-100 transition-colors shadow-sm"
                     >
