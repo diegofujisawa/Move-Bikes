@@ -19,13 +19,26 @@ if (typeof window !== 'undefined') {
 
 export const auth = getAuth(app);
 
-// Login anônimo automático — garante request.auth != null para as regras do Firestore
+// Promise que resolve quando o Firebase Auth estiver pronto.
+// Use: await waitForAuth() antes de qualquer escrita no Firestore.
+export const waitForAuth = (): Promise<void> => {
+  return new Promise((resolve) => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        unsubscribe();
+        resolve();
+      }
+    });
+  });
+};
+
+// Login anônimo automático ao inicializar
 if (typeof window !== 'undefined') {
   onAuthStateChanged(auth, (user) => {
     if (!user) {
-      signInAnonymously(auth).catch((err) => {
-        console.error('Erro no login anônimo do Firebase:', err);
-      });
+      signInAnonymously(auth)
+        .then(() => console.log('[Firebase] Login anônimo realizado.'))
+        .catch((err) => console.error('[Firebase] Erro no login anônimo:', err));
     }
   });
 }

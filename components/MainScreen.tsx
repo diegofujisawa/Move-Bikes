@@ -8,6 +8,7 @@ import {
 } from './icons';
 import { Html5Qrcode } from 'html5-qrcode';
 import { auth, db } from '../firebase';
+import { waitForAuth } from '../firebase';
 import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
 import {
   collection, onSnapshot, query, doc, updateDoc, addDoc,
@@ -305,7 +306,8 @@ const MainScreen: React.FC<MainScreenProps> = ({
     const dedupRoute = [...new Set(newRoute.map(String))];
     const dedupCollected = [...new Set(newCollected.map(String))];
 
-    // 1. Firebase imediato (fonte de verdade)
+    // Aguarda autenticação Firebase antes de qualquer escrita
+    await waitForAuth();
     await setDoc(doc(db, 'users', driverName), {
       routeBikes: dedupRoute,
       collectedBikes: dedupCollected,
@@ -553,6 +555,8 @@ const MainScreen: React.FC<MainScreenProps> = ({
     setIsLoading(true);
 
     try {
+      // Aguarda autenticação Firebase antes de qualquer escrita
+      await waitForAuth();
       const userRef = doc(db, 'users', driverName);
       const snap = await getDoc(userRef);
       const userData = snap.data() || {};
