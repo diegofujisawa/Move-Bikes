@@ -147,6 +147,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const [isVehicleModalOpen, setIsVehicleModalOpen] = useState(false);
   const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
   const [isAdminAlertsOpen, setIsAdminAlertsOpen] = useState(false);
+  const [adminNotification, setAdminNotification] = useState<any>(null);
   const [isReporModalOpen, setIsReporModalOpen] = useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
   const [isEditDriverModalOpen, setIsEditDriverModalOpen] = useState(false);
@@ -436,8 +437,19 @@ const MainScreen: React.FC<MainScreenProps> = ({
       if (hasNew) showNotification('Novo Pedido', 'Você tem uma nova solicitação pendente.');
     }, err => console.error('Listener requests:', err));
 
+    // Estado do motorista
+    const unsubUser = onSnapshot(doc(db, 'users', driverName), (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      if (data.sheetsSync === true) return;
+      if (isUpdatingStateRef.current) return;
+      setRouteBikes(data.routeBikes || []);
+      setCollectedBikes(data.collectedBikes || []);
+    }, err => console.error('Listener usuário:', err));
+
     // Alertas (ADM)
     let unsubAlerts = () => {};
+    let unsubNotifications = () => {};
     if (isAdm) {
       const qAlerts = query(collection(db, 'alerts'));
       unsubAlerts = onSnapshot(qAlerts, snapshot => {
@@ -446,26 +458,25 @@ const MainScreen: React.FC<MainScreenProps> = ({
         setAlerts(updated);
         setAlertCount(updated.length);
       }, err => console.error('Listener alertas:', err));
+
+      // Listener de notificações de carretinha finalizada
+      const qNotif = query(
+        collection(db, 'notifications'),
+        where('recipient', '==', 'ADM'),
+        where('type', '==', 'trailer_finalizado')
+      );
+      unsubNotifications = onSnapshot(qNotif, snapshot => {
+        snapshot.docChanges().forEach(change => {
+          if (change.type === 'added') {
+            const data = change.doc.data();
+            const msg = data.message || `Carretinha finalizada. Bikes: ${(data.bikes || []).join(', ')}`;
+            setAdminNotification({ id: change.doc.id, message: msg, bikes: data.bikes || [], trailerName: data.trailerName });
+          }
+        });
+      }, err => console.error('Listener notificações:', err));
     }
 
-    // Estado do motorista
-    // REGRA: Só aplica se não tiver sheetsSync=true (evita loop)
-    // e não tiver operação ativa.
-    const unsubUser = onSnapshot(doc(db, 'users', driverName), (snap) => {
-      if (!snap.exists()) return;
-      const data = snap.data();
-
-      // Ignora updates que vieram do sync do Sheets (evita loop)
-      if (data.sheetsSync === true) return;
-
-      // Ignora se há operação ativa no momento
-      if (isUpdatingStateRef.current) return;
-
-      setRouteBikes(data.routeBikes || []);
-      setCollectedBikes(data.collectedBikes || []);
-    }, err => console.error('Listener usuário:', err));
-
-    return () => { unsubRequests(); unsubAlerts(); unsubUser(); };
+    return () => { unsubRequests(); unsubAlerts(); unsubUser(); unsubNotifications(); };
   }, [driverName, isAdm]);
 
   // =================================================================
@@ -1086,55 +1097,89 @@ const MainScreen: React.FC<MainScreenProps> = ({
 
   const handleMechanicSelectionConfirm = async (mechanicName: string) => {
     setIsLoading(true);
+    const bikeNumber = selectedMechanicBike.patrimonio;
+    // Atualização otimista — remove da lista imediatamente
+    setMechanicsList(prev => prev.map(b =>
+      b.patrimonio === bikeNumber ? { ...b, status: 'Em Manutenção', mecanico: mechanicName } : b
+    ));
+    setIsMechanicSelectionModalOpen(false);
     try {
-      const bikeNumber = selectedMechanicBike.patrimonio;
       await updateDoc(doc(db, 'bikes', bikeNumber), { status: 'Mecânica', responsavel: mechanicName, ultimaAtualizacao: serverTimestamp() });
       await addDoc(collection(db, 'reports'), { bikeNumber, status: 'Mecânica', driverName, mechanicName, timestamp: serverTimestamp(), type: 'Mecânica' });
       apiCall({ action: 'confirmMechanicsReceipt', bikeNumber, mechanicName }, 1, true).catch(() => {});
-      alert('Recebimento confirmado!');
-      setIsMechanicSelectionModalOpen(false);
-      refreshAll(true);
-    } catch (err: any) { alert('Erro: ' + err.message); }
-    finally { setIsLoading(false); }
+    } catch (err: any) {
+      alert('Erro: ' + err.message);
+      refreshAll(true); // reverte em caso de erro
+    } finally { setIsLoading(false); }
   };
 
   const handleFinalizeMechanicsRepair = async (treatment: string) => {
     if (!treatment) { alert('Descreva a tratativa.'); return; }
     setIsLoading(true);
+    const bikeNumber = selectedMechanicBike.patrimonio;
+    // Atualização otimista
+    setMechanicsList(prev => prev.map(b =>
+      b.patrimonio === bikeNumber ? { ...b, status: 'Reserva', tratativa: treatment } : b
+    ));
+    setIsMechanicRepairModalOpen(false);
     try {
-      const bikeNumber = selectedMechanicBike.patrimonio;
       await updateDoc(doc(db, 'bikes', bikeNumber), { status: 'Em Estação', responsavel: null, observacao: treatment, ultimaAtualizacao: serverTimestamp() });
       await addDoc(collection(db, 'reports'), { bikeNumber, status: 'Em Estação', driverName, treatment, timestamp: serverTimestamp(), type: 'Reparo' });
       apiCall({ action: 'finalizeMechanicsRepair', bikeNumber, mechanicName: driverName, treatment }, 1, true).catch(() => {});
-      alert('Reparo finalizado!');
-      setIsMechanicRepairModalOpen(false);
+    } catch (err: any) {
+      alert('Erro: ' + err.message);
       refreshAll(true);
-    } catch (err: any) { alert('Erro: ' + err.message); }
-    finally { setIsLoading(false); }
+    } finally { setIsLoading(false); }
   };
 
   const handleOrganizeTrailer = async (bikeNumbers: string[], trailerName: string) => {
     if (!trailerName) { alert('Informe o nome da carretinha.'); return; }
     setIsLoading(true);
+    // Atualização otimista
+    setMechanicsList(prev => prev.map(b =>
+      bikeNumbers.includes(b.patrimonio) ? { ...b, carretinha: trailerName } : b
+    ));
+    setIsTrailerSelectionModalOpen(false);
     try {
       await Promise.all(bikeNumbers.map(id => updateDoc(doc(db, 'bikes', id), { carretinha: trailerName, ultimaAtualizacao: serverTimestamp() })));
       apiCall({ action: 'organizeTrailer', bikeNumbers, trailerName }, 1, true).catch(() => {});
-      alert('Organizado!');
+    } catch (err: any) {
+      alert('Erro: ' + err.message);
       refreshAll(true);
-    } catch (err: any) { alert('Erro: ' + err.message); }
-    finally { setIsLoading(false); }
+    } finally { setIsLoading(false); }
   };
 
   const handleFinalizeTrailer = async (trailerName: string) => {
+    if (!window.confirm(`Finalizar a carretinha "${trailerName}"? Os ADMs serão notificados para alterar o status das bikes.`)) return;
     setIsLoading(true);
+    // Atualização otimista — remove bikes da reserva
+    setMechanicsList(prev => prev.map(b =>
+      b.carretinha === trailerName ? { ...b, status: 'Remanejada' } : b
+    ));
     try {
-      const bikes = Object.entries(collectedBikesDetails).filter(([, d]) => d.carretinha === trailerName).map(([id]) => id);
+      const bikes = mechanicsList.filter(b => b.carretinha === trailerName && b.status === 'Reserva').map(b => b.patrimonio);
       await Promise.all(bikes.map(id => setDoc(doc(db, 'bikes', id), { carretinha: null, ultimaAtualizacao: serverTimestamp() }, { merge: true })));
       apiCall({ action: 'finalizeTrailer', trailerName }, 1, true).catch(() => {});
-      alert('Carretinha finalizada!');
+      // Envia notificação para todos os ADMs
+      await addDoc(collection(db, 'notifications'), {
+        type: 'trailer_finalizado',
+        message: `🚌 Carretinha "${trailerName}" finalizada por ${driverName}. ${bikes.length} bike(s) prontas para alterar status: ${bikes.join(', ')}`,
+        bikes,
+        trailerName,
+        mechanic: driverName,
+        timestamp: serverTimestamp(),
+        recipient: 'ADM'
+      });
+      apiCall({
+        action: 'notifyAdmins',
+        message: `Carretinha "${trailerName}" finalizada por ${driverName}. Bikes para alterar status: ${bikes.join(', ')}`,
+        bikes,
+        trailerName
+      }, 1, true).catch(() => {});
+    } catch (err: any) {
+      alert('Erro: ' + err.message);
       refreshAll(true);
-    } catch (err: any) { alert('Erro: ' + err.message); }
-    finally { setIsLoading(false); }
+    } finally { setIsLoading(false); }
   };
 
   const handleInsertBike = async (bikeNumber: string, targetStatus: string) => {
@@ -1941,8 +1986,15 @@ const MainScreen: React.FC<MainScreenProps> = ({
                           </div>
                           <div className="flex flex-wrap gap-x-2 gap-y-0.5">
                             {bike.bateria !== undefined && <p className="text-[10px] text-gray-600">Bateria: {bike.bateria}%</p>}
-                            {bike.carregamento && <p className="text-[10px] text-green-600 font-bold">⚡ Carregando</p>}
+                            {bike.carregamento === 'Carregando' && (
+                              <p className="text-[10px] text-green-600 font-bold">⚡ Carregando</p>
+                            )}
+                            {bike.carregamento === 'Não carregando' && (
+                              <p className="text-[10px] text-red-500 font-bold">🔌 Não carregando</p>
+                            )}
                           </div>
+                          {bike.motorista && <p className="text-[10px] text-blue-700 font-semibold">Motorista: {bike.motorista}</p>}
+                          {bike.observacao && <p className="text-[10px] text-orange-600">Motivo: {bike.observacao}</p>}
                           {bike.mecanico && <p className="text-[10px] font-bold text-blue-600">Mecânico: {bike.mecanico}</p>}
                           {bike.tratativa && <p className="text-[10px] text-gray-500 italic">Obs: {bike.tratativa}</p>}
                         </div>
@@ -1973,10 +2025,13 @@ const MainScreen: React.FC<MainScreenProps> = ({
                           <span className="font-bold text-gray-700">Bike: {bike.patrimonio}</span>
                           <div className="flex flex-wrap gap-x-2 gap-y-0.5">
                             {bike.bateria !== undefined && <p className="text-[10px] text-gray-600">Bateria: {bike.bateria}%</p>}
-                            {bike.carregamento && <p className="text-[10px] text-green-600 font-bold">⚡ Carregando</p>}
+                            {bike.carregamento === 'Carregando' && <p className="text-[10px] text-green-600 font-bold">⚡ Carregando</p>}
+                            {bike.carregamento === 'Não carregando' && <p className="text-[10px] text-red-500 font-bold">🔌 Não carregando</p>}
                           </div>
                           {bike.mecanico && <p className="text-[10px] font-bold text-blue-600">Mecânico: {bike.mecanico}</p>}
-                          {bike.tratativa && <p className="text-[10px] text-gray-500 italic">Obs: {bike.tratativa}</p>}
+                          {bike.motorista && <p className="text-[10px] text-blue-700 font-semibold">Motorista: {bike.motorista}</p>}
+                          {bike.observacao && <p className="text-[10px] text-orange-600">Motivo: {bike.observacao}</p>}
+                          {bike.tratativa && bike.tratativa !== 'MANUAL' && <p className="text-[10px] text-gray-500 italic">Obs: {bike.tratativa}</p>}
                         </div>
                         <button onClick={() => { setSelectedMechanicBike(bike); setIsMechanicRepairModalOpen(true); }} className="px-3 py-1 bg-orange-600 text-white text-xs font-bold rounded hover:bg-orange-700 active:scale-95">Finalizar Reparo</button>
                       </div>
@@ -2012,7 +2067,8 @@ const MainScreen: React.FC<MainScreenProps> = ({
                               <span className="font-bold">{bike.patrimonio}</span>
                               <div className="flex flex-col items-center scale-90 origin-top">
                                 {bike.bateria !== undefined && <span className="text-[8px] text-gray-500">{bike.bateria}%</span>}
-                                {bike.carregamento && <span className="text-[8px] text-green-600 font-bold">⚡</span>}
+                                {bike.carregamento === 'Carregando' && <span className="text-[8px] text-green-600 font-bold">⚡</span>}
+                                {bike.carregamento === 'Não carregando' && <span className="text-[8px] text-red-500 font-bold">🔌</span>}
                               </div>
                               {bike.mecanico && <span className="text-[7px] text-blue-600 truncate max-w-full">{bike.mecanico}</span>}
                             </div>
@@ -2034,6 +2090,21 @@ const MainScreen: React.FC<MainScreenProps> = ({
         )}
 
         {/* PAINEL ADM */}
+        {isAdm && adminNotification && (
+          <div className="mx-4 mt-3 p-3 bg-green-50 border border-green-300 rounded-lg shadow-md">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-start gap-2">
+                <span className="text-2xl">🚌</span>
+                <div>
+                  <p className="font-bold text-green-800 text-sm">Carretinha Finalizada!</p>
+                  <p className="text-green-700 text-xs mt-0.5">{adminNotification.message}</p>
+                </div>
+              </div>
+              <button onClick={() => setAdminNotification(null)} className="text-green-500 hover:text-green-700 text-lg font-bold flex-shrink-0">✕</button>
+            </div>
+          </div>
+        )}
+
         {isAdm && (
           <div className="mt-6 overflow-hidden">
             <div className="flex gap-2 mb-2 px-1">

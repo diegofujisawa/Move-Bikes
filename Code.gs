@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '82.2-mechanics-clean';
+const BACKEND_VERSION = '82.7-mechanics-motorista';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -321,6 +321,7 @@ function doPost(e) {
       case 'getMechanicsList':      response = { ...getMechanicsList(), version: BACKEND_VERSION }; break;
       case 'confirmMechanicsReceipt': response = { ...confirmMechanicsReceipt(request.bikeNumber, request.mechanicName), version: BACKEND_VERSION }; break;
       case 'insertBikeMechanics':   response = { ...insertBikeMechanics(request.bikeNumber, request.driverName, request.targetStatus), version: BACKEND_VERSION }; break;
+      case 'notifyAdmins':          response = { ...notifyAdmins(request.message, request.bikes, request.trailerName), version: BACKEND_VERSION }; break;
       case 'finalizeMechanicsRepair': response = { ...finalizeMechanicsRepair(request.bikeNumber, request.mechanicName, request.treatment), version: BACKEND_VERSION }; break;
       case 'organizeTrailer':       response = { ...organizeTrailer(request.bikeNumbers, request.trailerName), version: BACKEND_VERSION }; break;
       case 'finalizeTrailer':       response = { ...finalizeTrailer(request.trailerName), version: BACKEND_VERSION }; break;
@@ -2619,15 +2620,27 @@ function getMechanicsList() {
 
   const CUTOFF_MS = new Date('2026-03-20T00:00:00').getTime();
 
-  // Mapa de bateria/carregamento
-  const bikeIndex = getBikeIndex();
+  // Mapa de bateria/carregamento — lê direto da planilha sem cache
   const bikeInfoMap = {};
-  Object.entries(bikeIndex).forEach(([pat, row]) => {
-    let bateria = row[COLUMN_INDICES.BIKES.BATERIA - 1];
-    if (typeof bateria === 'number' && bateria <= 1 && bateria > 0) bateria = Math.round(bateria * 100);
-    else if (typeof bateria === 'string' && bateria.includes('%')) bateria = parseInt(bateria.replace('%', ''));
-    bikeInfoMap[pat] = { bateria, carregamento: row[COLUMN_INDICES.BIKES.CARREGAMENTO - 1] };
-  });
+  try {
+    const bikesSheet = ss.getSheetByName(BIKES_SHEET_NAME);
+    if (bikesSheet && bikesSheet.getLastRow() > 1) {
+      const nCols = COLUMN_INDICES.BIKES.CARREGAMENTO; // lê até coluna H (8)
+      bikesSheet.getRange(2, 1, bikesSheet.getLastRow() - 1, nCols).getValues().forEach(row => {
+        const pat = String(row[COLUMN_INDICES.BIKES.PATRIMONIO - 1] || '').trim();
+        if (!pat) return;
+        let bateria = row[COLUMN_INDICES.BIKES.BATERIA - 1];
+        if (typeof bateria === 'number' && bateria <= 1 && bateria > 0) bateria = Math.round(bateria * 100);
+        else if (typeof bateria === 'string' && bateria.includes('%')) bateria = parseInt(bateria.replace('%', ''));
+        const carregamentoRaw = (row[COLUMN_INDICES.BIKES.CARREGAMENTO - 1] || '').toString().trim();
+        const carregamento = carregamentoRaw.toLowerCase() === 'carregando' ? 'Carregando' : (carregamentoRaw ? 'Não carregando' : '');
+        const info = { bateria, carregamento };
+        bikeInfoMap[pat] = info;
+        const patSemZeros = pat.replace(/^0+/, '');
+        if (patSemZeros !== pat) bikeInfoMap[patSemZeros] = info;
+      });
+    }
+  } catch(e) { console.error('getMechanicsList - erro ao ler bikes:', e); }
 
   // Helper: converte qualquer valor de data para ms
   const toMs = (raw) => {
@@ -2678,16 +2691,18 @@ function getMechanicsList() {
         if (!pat) return;
         const status = (row[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim().toLowerCase();
         if (!status) return;
+        const observacao = (row[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim();
+        const motorista  = (row[COLUMN_INDICES.REPORTS.MOTORISTA  - 1] || '').toString().trim();
 
         // Último status geral
         if (!lastStatusByBike[pat] || tsMs > lastStatusByBike[pat].tsMs) {
           lastStatusByBike[pat] = { tsMs, status };
         }
 
-        // Última ocorrência de Recolhida/Vandalizada
+        // Última ocorrência de Recolhida/Vandalizada — guarda motorista e observação
         if (status === 'recolhida' || status === 'vandalizada') {
           if (!reportEntries[pat] || tsMs > reportEntries[pat].tsMs) {
-            reportEntries[pat] = { tsMs, status };
+            reportEntries[pat] = { tsMs, status, motorista, observacao };
           }
         }
       });
@@ -2738,13 +2753,15 @@ function getMechanicsList() {
     const mechData = mechanicsStatus[pat];
     const info = bikeInfoMap[pat] || {};
     if (mechData) {
-      // Já processada pelo mecânico — usa status da aba
+      // Já processada pelo mecânico — usa status da aba, mas mantém motorista/observacao do Relatório
       bikeMap[pat] = {
         row: mechData.row, patrimonio: pat, status: mechData.status,
         dataEntrada: mechData.dataEntrada, mecanico: mechData.mecanico,
         tratativa: mechData.tratativa, dataFinalizacao: mechData.dataFinalizacao,
         carretinha: mechData.carretinha, bateria: info.bateria,
-        carregamento: info.carregamento, manual: mechData.manual
+        carregamento: info.carregamento, manual: mechData.manual,
+        motorista: entry.motorista || '',
+        observacao: entry.observacao || ''
       };
     } else {
       // Ainda não processada → Aguardando Confirmação
@@ -2752,7 +2769,10 @@ function getMechanicsList() {
         row: -1, patrimonio: pat, status: 'Aguardando Confirmação',
         dataEntrada: new Date(entry.tsMs), mecanico: '', tratativa: '',
         dataFinalizacao: '', carretinha: '',
-        bateria: info.bateria, carregamento: info.carregamento, manual: false
+        bateria: info.bateria, carregamento: info.carregamento,
+        motorista: entry.motorista || '',
+        observacao: entry.observacao || '',
+        manual: false
       };
     }
   });
@@ -2771,6 +2791,17 @@ function getMechanicsList() {
   });
 
   return { success: true, data: Object.values(bikeMap) };
+}
+
+function notifyAdmins(message, bikes, trailerName) {
+  try {
+    const ss = getSpreadsheet();
+    const sheet = ss.getSheetByName(NOTIFICATIONS_SHEET_NAME) || ss.insertSheet(NOTIFICATIONS_SHEET_NAME);
+    sheet.appendRow([new Date(), 'ADM', 'trailer_finalizado', trailerName, message, (bikes || []).join(', '), 'pendente']);
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
 }
 
 function insertBikeMechanics(bikeNumber, mechanicName, targetStatus) {
