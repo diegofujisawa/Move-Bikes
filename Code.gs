@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '82.7-mechanics-motorista';
+const BACKEND_VERSION = '83.4-timeline-bikes';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -318,7 +318,7 @@ function doPost(e) {
       case 'saveDailySummary':      response = { ...saveDailySummary(request.summaryData), version: BACKEND_VERSION }; break;
       case 'getAdminAlerts':        response = { ...getAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
       case 'clearAdminAlerts':      response = { ...clearAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
-      case 'getMechanicsList':      response = { ...getMechanicsList(), version: BACKEND_VERSION }; break;
+      case 'getBikeMovement':       response = { ...getBikeMovement(request.bikeNumber, request.limit), version: BACKEND_VERSION }; break;
       case 'confirmMechanicsReceipt': response = { ...confirmMechanicsReceipt(request.bikeNumber, request.mechanicName), version: BACKEND_VERSION }; break;
       case 'insertBikeMechanics':   response = { ...insertBikeMechanics(request.bikeNumber, request.driverName, request.targetStatus), version: BACKEND_VERSION }; break;
       case 'notifyAdmins':          response = { ...notifyAdmins(request.message, request.bikes, request.trailerName), version: BACKEND_VERSION }; break;
@@ -545,7 +545,7 @@ function handleSync(request) {
       }, driverName).data || [];
     }
 
-    if (isMecanica) {
+    if (isMecanica || isAdm) {
       response.data.mechanicsList = getMechanicsList().data || [];
     }
 
@@ -2380,8 +2380,12 @@ function getChangeStatusData(timeRange = '24h', providedSheets = null) {
 function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameFilter = null) {
   const cacheKey = `summary_${timeRange}_${driverNameFilter || 'all'}`;
   const cache = CacheService.getScriptCache();
-  const cached = cache.get(cacheKey);
-  if (cached) { try { return { success: true, data: JSON.parse(cached), cached: true }; } catch (e) {} }
+  // Não usa cache para 'day' e '-1' — precisam de timeline em tempo real
+  const useCache = timeRange !== 'day' && timeRange !== '-1';
+  if (useCache) {
+    const cached = cache.get(cacheKey);
+    if (cached) { try { return { success: true, data: JSON.parse(cached), cached: true }; } catch (e) {} }
+  }
 
   try {
     const accessSheet   = providedSheets ? providedSheets.access   : getSpreadsheet().getSheetByName(ACCESS_SHEET_NAME);
@@ -2479,14 +2483,63 @@ function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameF
       });
     }
 
+    // Monta timeline de eventos por motorista (apenas para timeRange 'day' e '-1')
+    const timelines = {};
+    const timelineWindows = {}; // { startMs, endMs } por motorista
+    drivers.forEach(d => { timelines[d] = []; });
+    if (timeRange === 'day' || timeRange === '-1') {
+      // Primeira passagem: pega todos os eventos incluindo INICIO_TURNO
+      const driverFirstLast = {}; // { firstMs, lastMs }
+      reportsData.forEach(row => {
+        const ts = parseTimestamp(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
+        if (!ts || ts < filterDate || ts > endDate) return;
+        const driverRaw = (row[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
+        const driverKey = driverLookup[driverRaw.toLowerCase()];
+        if (!driverKey) return;
+        const tsMs = ts.getTime();
+        if (!driverFirstLast[driverKey]) driverFirstLast[driverKey] = { firstMs: tsMs, lastMs: tsMs };
+        if (tsMs < driverFirstLast[driverKey].firstMs) driverFirstLast[driverKey].firstMs = tsMs;
+        if (tsMs > driverFirstLast[driverKey].lastMs) driverFirstLast[driverKey].lastMs = tsMs;
+      });
+
+      // Segunda passagem: monta eventos (excluindo INICIO_TURNO/FIM_TURNO do plot)
+      reportsData.forEach(row => {
+        const ts = parseTimestamp(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
+        if (!ts || ts < filterDate || ts > endDate) return;
+        const driverRaw = (row[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
+        const driverKey = driverLookup[driverRaw.toLowerCase()];
+        if (!driverKey) return;
+        const status = (row[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim().toLowerCase();
+        let type = null;
+        if (status === 'recolhida' || status === 'vandalizada') type = 'recolhida';
+        else if (status === 'estação' || status === 'estacao') type = 'estacao';
+        else if (status.includes('filial')) type = 'filial';
+        else if (status.includes('não encontrada') || status.includes('nao encontrada')) type = 'nao_encontrada';
+        else if (status.includes('não atendida') || status.includes('nao atendida')) type = 'nao_atendida';
+        if (type) {
+          const pat = String(row[COLUMN_INDICES.REPORTS.PATRIMONIO - 1] || '').trim().replace(/^0+/, '');
+          const obs = String(row[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').trim();
+          timelines[driverKey].push({ tsMs: ts.getTime(), hour: ts.getHours(), min: ts.getMinutes(), type, bikeNumber: pat, observacao: obs });
+        }
+      });
+
+      // Define janela por motorista
+      drivers.forEach(d => {
+        const fl = driverFirstLast[d];
+        if (fl) timelineWindows[d] = { startMs: fl.firstMs, endMs: fl.lastMs };
+      });
+    }
+
     const summary = drivers.map(d => ({
       name: d,
       stats: stats[d],
       realTime: realTime[d] || { route: [], collected: [] },
-      pendingRequests: pendingCounts[d]
+      pendingRequests: pendingCounts[d],
+      timeline: timelines[d] || [],
+      timelineWindow: timelineWindows[d] || null
     }));
 
-    try { cache.put(cacheKey, JSON.stringify(summary), 30); } catch (e) {}
+    if (useCache) { try { cache.put(cacheKey, JSON.stringify(summary), 30); } catch (e) {} }
     return { success: true, data: summary };
   } catch (e) {
     return { success: false, error: 'Erro ao gerar resumo: ' + e.message };
@@ -2606,6 +2659,107 @@ function addToMechanics(bikeNumber) {
         && data[i][COLUMN_INDICES.MECHANICS.STATUS - 1] !== 'Remanejada') return;
   }
   sheet.appendRow([bikeNumber, 'Aguardando Confirmação', new Date(), '', '', '', '']);
+}
+
+function getBikeMovement(bikeNumber, limit) {
+  if (!bikeNumber) return { success: false, error: 'Patrimônio não informado.' };
+  limit = parseInt(limit) || 5;
+  if (![5, 10, 15].includes(limit)) limit = 5;
+
+  try {
+    const ss = getSpreadsheet();
+    const bikeStr = String(bikeNumber).trim().replace(/^0+/, '');
+    const records = [];
+
+    // 1. Lê o Relatório (movimentação dos motoristas)
+    const reportSheet = ss.getSheetByName(REPORT_SHEET_NAME);
+    if (reportSheet && reportSheet.getLastRow() > 1) {
+      const lastRow = reportSheet.getLastRow();
+      const rowsToRead = Math.min(lastRow - 1, 10000);
+      const data = reportSheet.getRange(lastRow - rowsToRead + 1, 1, rowsToRead, 9).getValues();
+
+      for (let i = data.length - 1; i >= 0; i--) {
+        const row = data[i];
+        const pat = String(row[COLUMN_INDICES.REPORTS.PATRIMONIO - 1] || '').trim().replace(/^0+/, '');
+        if (pat !== bikeStr) continue;
+
+        const ts = row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1];
+        const tsDate = ts instanceof Date ? ts : parseTimestamp(ts);
+        if (!tsDate) continue;
+
+        records.push({
+          tsDate,
+          timestamp:  tsDate.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
+          status:     (row[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim(),
+          observacao: (row[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim(),
+          motorista:  (row[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim(),
+          bateria:    (row[COLUMN_INDICES.REPORTS.BATERIA - 1] || '').toString().trim(),
+          trava:      (row[COLUMN_INDICES.REPORTS.TRAVA - 1] || '').toString().trim(),
+          localidade: (row[COLUMN_INDICES.REPORTS.LOCALIDADE - 1] || '').toString().trim(),
+          origem:     'relatorio'
+        });
+      }
+    }
+
+    // 2. Lê a aba Mecânica (movimentação interna)
+    const mecSheet = ss.getSheetByName(MECHANICS_SHEET_NAME);
+    if (mecSheet && mecSheet.getLastRow() > 1) {
+      const mecData = mecSheet.getDataRange().getValues().slice(1);
+      mecData.forEach(row => {
+        const pat = String(row[COLUMN_INDICES.MECHANICS.PATRIMONIO - 1] || '').trim().replace(/^0+/, '');
+        if (pat !== bikeStr) return;
+
+        const status    = (row[COLUMN_INDICES.MECHANICS.STATUS - 1] || '').toString().trim();
+        const mecanico  = (row[COLUMN_INDICES.MECHANICS.MECANICO - 1] || '').toString().trim();
+        const tratativa = (row[COLUMN_INDICES.MECHANICS.TRATATIVA - 1] || '').toString().trim();
+        const dataFin   = row[COLUMN_INDICES.MECHANICS.DATA_FINALIZACAO - 1];
+        const dataEnt   = row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1];
+
+        // Entrada na mecânica
+        const entDate = dataEnt instanceof Date ? dataEnt : parseTimestamp(dataEnt);
+        if (entDate && status !== 'Remanejada') {
+          records.push({
+            tsDate: entDate,
+            timestamp: entDate.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
+            status,
+            observacao: tratativa && tratativa !== 'MANUAL' ? tratativa : '',
+            motorista:  mecanico,
+            bateria:    '',
+            trava:      '',
+            localidade: '',
+            origem:     'mecanica'
+          });
+        }
+
+        // Finalização (Reserva/Remanejada)
+        const finDate = dataFin instanceof Date ? dataFin : parseTimestamp(dataFin);
+        if (finDate && (status === 'Reserva' || status === 'Remanejada')) {
+          records.push({
+            tsDate: finDate,
+            timestamp: finDate.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }),
+            status: status === 'Reserva' ? 'Reparo Finalizado → Reserva' : 'Remanejada',
+            observacao: tratativa && tratativa !== 'MANUAL' ? `Tratativa: ${tratativa}` : '',
+            motorista:  mecanico,
+            bateria:    '',
+            trava:      '',
+            localidade: '',
+            origem:     'mecanica'
+          });
+        }
+      });
+    }
+
+    // Ordena por data decrescente e limita
+    records.sort((a, b) => b.tsDate - a.tsDate);
+    const limited = records.slice(0, limit).map(r => {
+      const { tsDate, ...rest } = r;
+      return rest;
+    });
+
+    return { success: true, data: limited };
+  } catch (e) {
+    return { success: false, error: 'Erro ao buscar movimentação: ' + e.message };
+  }
 }
 
 function getMechanicsList() {

@@ -16,8 +16,8 @@ import { auth, db } from '../firebase';
 import { waitForAuth } from '../firebase';
 import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
 import {
-  collection, onSnapshot, query, doc, updateDoc, addDoc,
-  serverTimestamp, getDoc, setDoc, deleteDoc, getDocs, where
+  collection, onSnapshot, query, where, doc, updateDoc, addDoc,
+  serverTimestamp, getDoc, setDoc, deleteDoc, getDocs
 } from 'firebase/firestore';
 import ScheduleModal from './ScheduleModal';
 import ReporModal from './ReporModal';
@@ -162,9 +162,15 @@ const MainScreen: React.FC<MainScreenProps> = ({
 
   // --- Dados ADM ---
   const [driversSummary, setDriversSummary] = useState<any[]>([]);
+  const [firebaseTimelineEvents, setFirebaseTimelineEvents] = useState<Record<string, Array<{tsMs: number, type: string}>>>({});
+  const [timelineModal, setTimelineModal] = useState<{driver: string, events: any[], startMs: number, endMs: number} | null>(null);
   const [summaryTimeRange, setSummaryTimeRange] = useState<'day' | 'week' | 'month' | '-1' | '-7'>('day');
   const [isSummaryLoading, setIsSummaryLoading] = useState(false);
-  const [activeQuadrant, setActiveQuadrant] = useState<'summary' | 'alerts' | 'vandalized' | 'status'>('summary');
+  const [activeQuadrant, setActiveQuadrant] = useState<'summary' | 'alerts' | 'vandalized' | 'status' | 'mechanics' | 'bike_search'>('summary');
+  const [bikeSearchTerm, setBikeSearchTerm] = useState('');
+  const [bikeSearchLimit, setBikeSearchLimit] = useState<5|10|15>(5);
+  const [bikeSearchResult, setBikeSearchResult] = useState<any[]>([]);
+  const [isBikeSearchLoading, setIsBikeSearchLoading] = useState(false);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [isAlertsLoading, setIsAlertsLoading] = useState(false);
   const [vandalizedBikes, setVandalizedBikes] = useState<any[]>([]);
@@ -213,6 +219,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const [searchedBike, setSearchedBike] = useState<BicycleData | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [activeMechanicCategory, setActiveMechanicCategory] = useState<string | null>(null);
+  const [mechanicSummaryPeriod, setMechanicSummaryPeriod] = useState<'diario'|'semanal'|'mensal'>('diario');
   const [clickedBikesForStatus, setClickedBikesForStatus] = useState<Set<string>>(() => {
     try {
       const saved = localStorage.getItem(`status_clicked_${driverName}`);
@@ -476,7 +483,29 @@ const MainScreen: React.FC<MainScreenProps> = ({
       }, err => console.error('Listener notificações:', err));
     }
 
-    return () => { unsubRequests(); unsubAlerts(); unsubUser(); unsubNotifications(); };
+    // Listener de timeline_events (para ADM — enriquece a timeline dos motoristas)
+    let unsubTimeline = () => {};
+    if (isAdm) {
+      const today = new Date().toISOString().slice(0, 10);
+      const qTimeline = query(
+        collection(db, 'timeline_events'),
+        where('date', '==', today)
+      );
+      unsubTimeline = onSnapshot(qTimeline, snapshot => {
+        const byDriver: Record<string, Array<{tsMs: number, type: string}>> = {};
+        snapshot.forEach(d => {
+          const data = d.data();
+          const driver = data.driverName;
+          if (!driver) return;
+          const ts = data.timestamp?.toDate?.() || new Date();
+          if (!byDriver[driver]) byDriver[driver] = [];
+          byDriver[driver].push({ tsMs: ts.getTime(), type: data.type || 'recolhida' });
+        });
+        setFirebaseTimelineEvents(byDriver);
+      }, err => console.error('Listener timeline:', err));
+    }
+
+    return () => { unsubRequests(); unsubAlerts(); unsubUser(); unsubNotifications(); unsubTimeline(); };
   }, [driverName, isAdm]);
 
   // =================================================================
@@ -651,16 +680,18 @@ const MainScreen: React.FC<MainScreenProps> = ({
           status: 'Recolhida', responsavel: driverName, ultimaAtualizacao: serverTimestamp()
         }, { merge: true });
 
-        // Log no Firestore
-        await addDoc(collection(db, 'reports'), {
-          driverName, bikeNumber, status: 'Recolhida', timestamp: serverTimestamp(), observation: ''
+        // Evento de timeline — registra entrada na posse sem gerar relatório
+        addDoc(collection(db, 'timeline_events'), {
+          driverName,
+          bikeNumber,
+          type: 'em_posse',
+          timestamp: serverTimestamp(),
+          date: new Date().toISOString().slice(0, 10)
+        }).then(() => {
+          console.log('[Timeline] Evento em_posse gravado:', bikeNumber);
+        }).catch(err => {
+          console.error('[Timeline] Erro ao gravar evento em_posse:', err.code, err.message);
         });
-
-        // Log no Sheets
-        apiCall({
-          action: 'finalizeRouteBike', driverName, bikeNumber,
-          finalStatus: 'Recolhida', finalObservation: ''
-        }, 1, true).catch(e => console.warn('[Sheets] finalizeRouteBike:', e));
 
         setSuccessMessage(`Bicicleta ${bikeNumber} recolhida!`);
         setSearchedBike(null);
@@ -840,6 +871,18 @@ const MainScreen: React.FC<MainScreenProps> = ({
         await Promise.all(bikesToAdd.map(id => setDoc(doc(db, 'bikes', id), {
           status: 'Recolhida', responsavel: driverName, ultimaAtualizacao: serverTimestamp()
         }, { merge: true })));
+        // Registra no Relatório para aparecer na timeline
+        bikesToAdd.forEach(id => {
+          apiCall({ action: 'logReport', rowData: [
+            new Date().toISOString(), id, 'Recolhida', 'Recebida via carretinha', driverName, '', '', '', ''
+          ]}, 1, true).catch(() => {});
+          // Evento de timeline Firebase
+          addDoc(collection(db, 'timeline_events'), {
+            driverName, bikeNumber: id, type: 'recolhida',
+            timestamp: serverTimestamp(),
+            date: new Date().toISOString().slice(0, 10)
+          }).catch(() => {});
+        });
       } else {
         newRoute = [...new Set([...newRoute, ...bikesToAdd])];
         newCollected = newCollected.filter(b => !bikesToAdd.includes(String(b)));
@@ -965,6 +1008,18 @@ const MainScreen: React.FC<MainScreenProps> = ({
   // =================================================================
   // BUSCA
   // =================================================================
+  const handleBikeMovementSearch = async () => {
+    if (!bikeSearchTerm.trim()) return;
+    setIsBikeSearchLoading(true);
+    setBikeSearchResult([]);
+    try {
+      const result = await apiCall({ action: 'getBikeMovement', bikeNumber: bikeSearchTerm.trim(), limit: bikeSearchLimit });
+      if (result.success) setBikeSearchResult(result.data || []);
+      else alert('Bike não encontrada: ' + result.error);
+    } catch (e: any) { alert('Erro: ' + e.message); }
+    finally { setIsBikeSearchLoading(false); }
+  };
+
   const handleSearch = async (bikeToSearch?: string) => {
     const term = (bikeToSearch || searchTerm).trim();
     if (!term) { setSearchedBike(null); setSearchTerm(''); return; }
@@ -1359,7 +1414,22 @@ const MainScreen: React.FC<MainScreenProps> = ({
     setIsSummaryLoading(true);
     try {
       const r = await apiCall({ action: 'getDriversSummary', timeRange: range }, 1, true);
-      if (r.success && summaryTimeRange === range) setDriversSummary(r.data);
+      if (r.success && summaryTimeRange === range) {
+        setDriversSummary(prev => {
+          // Preserva timeline e timelineWindow anteriores se o novo dado não tem eventos
+          // (garante que eventos passados não somem entre syncs)
+          return r.data.map((newDriver: any) => {
+            const prevDriver = prev.find((p: any) => p.name === newDriver.name);
+            const hasNewTimeline = newDriver.timeline && newDriver.timeline.length > 0;
+            const hasPrevTimeline = prevDriver?.timeline && prevDriver.timeline.length > 0;
+            return {
+              ...newDriver,
+              timeline: hasNewTimeline ? newDriver.timeline : (hasPrevTimeline ? prevDriver.timeline : []),
+              timelineWindow: newDriver.timelineWindow || prevDriver?.timelineWindow || null,
+            };
+          });
+        });
+      }
       else if (!r.success) await runDriversSummaryFallback();
     } catch { await runDriversSummaryFallback(); }
     finally { setIsSummaryLoading(false); }
@@ -1437,7 +1507,17 @@ const MainScreen: React.FC<MainScreenProps> = ({
       if (d.motoristas) setMotoristas(d.motoristas);
       if (d.driverLocations) setDriverLocations(d.driverLocations);
       if (d.mechanicsList) setMechanicsList(d.mechanicsList);
-      if (d.driversSummary) setDriversSummary(d.driversSummary);
+      if (d.driversSummary) {
+        setDriversSummary(prev => d.driversSummary.map((newD: any) => {
+          const prevD = prev.find((p: any) => p.name === newD.name);
+          const hasNewTL = newD.timeline && newD.timeline.length > 0;
+          return {
+            ...newD,
+            timeline: hasNewTL ? newD.timeline : (prevD?.timeline || []),
+            timelineWindow: newD.timelineWindow || prevD?.timelineWindow || null,
+          };
+        }));
+      }
 
       if (d.bikeDetails) {
         const details = d.bikeDetails;
@@ -1510,7 +1590,17 @@ const MainScreen: React.FC<MainScreenProps> = ({
       if (d.motoristas) setMotoristas(d.motoristas);
       if (d.driverLocations) setDriverLocations(d.driverLocations);
       if (d.mechanicsList) setMechanicsList(d.mechanicsList);
-      if (d.driversSummary) setDriversSummary(d.driversSummary);
+      if (d.driversSummary) {
+        setDriversSummary(prev => d.driversSummary.map((newD: any) => {
+          const prevD = prev.find((p: any) => p.name === newD.name);
+          const hasNewTL = newD.timeline && newD.timeline.length > 0;
+          return {
+            ...newD,
+            timeline: hasNewTL ? newD.timeline : (prevD?.timeline || []),
+            timelineWindow: newD.timelineWindow || prevD?.timelineWindow || null,
+          };
+        }));
+      }
       if (d.alerts) setAlerts(d.alerts);
       if (d.vandalized) setVandalizedBikes(d.vandalized);
       if (d.changeStatusData) setChangeStatusData(d.changeStatusData);
@@ -1780,6 +1870,66 @@ const MainScreen: React.FC<MainScreenProps> = ({
             ))}
           </div>
         )}
+
+        {/* RESUMO DE PRODUÇÃO MECÂNICA — acima da busca */}
+        {isMecanica && (() => {
+          const periods = [
+            { key: 'diario' as const, label: 'Dia' },
+            { key: 'semanal' as const, label: 'Semana' },
+            { key: 'mensal' as const, label: 'Mês' },
+          ];
+          const now = new Date();
+          const cutoff = new Date();
+          if (mechanicSummaryPeriod === 'semanal') { cutoff.setDate(now.getDate() - 7); cutoff.setHours(0,0,0,0); }
+          else if (mechanicSummaryPeriod === 'mensal') { cutoff.setMonth(now.getMonth() - 1); cutoff.setHours(0,0,0,0); }
+          else { cutoff.setHours(0,0,0,0); }
+          const byMechanic: Record<string, {manutencao: number, reserva: number}> = {};
+          mechanicsList.filter(b => b.status === 'Em Manutenção' || b.status === 'Reserva').forEach(b => {
+            const m = b.mecanico || '—';
+            if (!byMechanic[m]) byMechanic[m] = { manutencao: 0, reserva: 0 };
+            const entryDate = b.dataEntrada ? new Date(b.dataEntrada) : null;
+            if (!entryDate || entryDate >= cutoff) {
+              if (b.status === 'Em Manutenção') byMechanic[m].manutencao++;
+              else byMechanic[m].reserva++;
+            }
+          });
+          const mechs = Object.entries(byMechanic);
+          return (
+            <div className="mb-3 px-3 py-2 border rounded-lg bg-white shadow-sm">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] font-black text-gray-600 uppercase tracking-widest">Produção</span>
+                <div className="flex bg-gray-100 rounded-full p-0.5 gap-0.5">
+                  {periods.map(p => (
+                    <button key={p.key} onClick={() => setMechanicSummaryPeriod(p.key)}
+                      className={`text-[8px] font-bold px-2 py-0.5 rounded-full transition-all ${mechanicSummaryPeriod === p.key ? 'bg-white text-gray-700 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                    >{p.label}</button>
+                  ))}
+                </div>
+              </div>
+              {mechs.length === 0 ? (
+                <p className="text-[9px] text-gray-400 italic text-center py-1">Sem dados</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {mechs.map(([name, counts]) => (
+                    <div key={name} className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-gray-500 uppercase w-16 truncate flex-shrink-0">{name}</span>
+                      <div className="flex gap-1.5 flex-1">
+                        <div className="flex flex-col items-center py-0.5 px-2 bg-orange-50 border border-orange-100 rounded-md flex-1">
+                          <span className="text-[7px] font-bold text-orange-400 uppercase leading-none">Man</span>
+                          <span className="text-sm font-black text-orange-500 leading-tight">{counts.manutencao}</span>
+                        </div>
+                        <div className="flex flex-col items-center py-0.5 px-2 bg-green-50 border border-green-100 rounded-md flex-1">
+                          <span className="text-[7px] font-bold text-green-500 uppercase leading-none">Res</span>
+                          <span className="text-sm font-black text-green-600 leading-tight">{counts.reserva}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* BUSCA */}
         {!isAdm && (
@@ -2113,6 +2263,12 @@ const MainScreen: React.FC<MainScreenProps> = ({
                 { key: 'alerts', icon: <AlertIcon className="w-5 h-5"/>, color: 'red' },
                 { key: 'vandalized', icon: <AlertTriangleIcon className="w-5 h-5"/>, color: 'orange' },
                 { key: 'status', icon: <PlusPlusIcon className="w-5 h-5"/>, color: 'blue' },
+                { key: 'mechanics', icon: (
+                  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                  </svg>
+                ), color: 'orange' },
+                { key: 'bike_search', icon: <SearchIcon className="w-5 h-5"/>, color: 'purple' },
               ].map(({ key, icon, color }) => (
                 <button key={key} onClick={() => setActiveQuadrant(key as any)}
                   className={`p-2 rounded-full transition-all ${activeQuadrant === key ? `bg-${color}-600 text-white shadow-md` : 'bg-gray-200 text-gray-500'}`}>
@@ -2123,7 +2279,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
 
             <div className="relative w-full overflow-hidden rounded-lg border bg-gray-50 shadow-inner min-h-[400px]">
               <div className="flex transition-transform duration-500 ease-in-out"
-                style={{ transform: `translateX(${activeQuadrant === 'summary' ? '0%' : activeQuadrant === 'alerts' ? '-100%' : activeQuadrant === 'vandalized' ? '-200%' : '-300%'})` }}>
+                style={{ transform: `translateX(${activeQuadrant === 'summary' ? '0%' : activeQuadrant === 'alerts' ? '-100%' : activeQuadrant === 'vandalized' ? '-200%' : activeQuadrant === 'status' ? '-300%' : activeQuadrant === 'mechanics' ? '-400%' : '-500%'})` }}>
 
                 {/* Quadrante 1: Resumo */}
                 <div className="w-full flex-shrink-0 p-3">
@@ -2152,6 +2308,122 @@ const MainScreen: React.FC<MainScreenProps> = ({
                               <SearchIcon className="w-4 h-4"/>
                             </button>
                           </div>
+
+                          {/* Linha do tempo de atividade */}
+                          {(() => {
+                            const sheetsEvents = (driver.timeline || []) as Array<{tsMs: number, hour: number, min: number, type: string, bikeNumber?: string}>;
+                            const fbEvents = (firebaseTimelineEvents[driver.name] || []).map((e: any) => ({
+                              tsMs: e.tsMs, hour: new Date(e.tsMs).getHours(),
+                              min: new Date(e.tsMs).getMinutes(), type: e.type, bikeNumber: e.bikeNumber
+                            }));
+                            const merged = [...sheetsEvents];
+                            fbEvents.forEach(fe => {
+                              const isDup = sheetsEvents.some(se => se.type === fe.type && Math.abs(se.tsMs - fe.tsMs) < 2 * 60 * 1000);
+                              if (!isDup) merged.push(fe);
+                            });
+                            const events = merged.sort((a, b) => a.tsMs - b.tsMs);
+
+                            const window = driver.timelineWindow as {startMs: number, endMs: number} | null;
+                            let startMs = window?.startMs;
+                            let endMs   = window?.endMs;
+                            if (fbEvents.length > 0) {
+                              const fbMin = Math.min(...fbEvents.map(e => e.tsMs));
+                              const fbMax = Math.max(...fbEvents.map(e => e.tsMs));
+                              startMs = startMs ? Math.min(startMs, fbMin) : fbMin;
+                              endMs   = endMs   ? Math.max(endMs,   fbMax) : fbMax;
+                            }
+                            if (!startMs || !endMs) {
+                              // Sem dados ainda — mostra linha vazia
+                              return (
+                                <div className="mb-3">
+                                  <div className="flex items-center justify-between mb-1.5">
+                                    <p className="text-[8px] font-black text-gray-400 uppercase tracking-wider">Linha do Tempo</p>
+                                  </div>
+                                  <div className="relative h-5 mx-1">
+                                    <div className="absolute top-2 left-0 right-0 h-px bg-gray-200"/>
+                                    <span className="absolute top-3.5 left-1/2 -translate-x-1/2 text-[7px] text-gray-300 italic">sem registros no período</span>
+                                  </div>
+                                </div>
+                              );
+                            }
+
+                            const totalMs = endMs - startMs || 1;
+                            const toPos = (tsMs: number) => Math.max(0, Math.min(100, (tsMs - startMs!) / totalMs * 100));
+                            const fmtTime = (ms: number) => {
+                              const d = new Date(ms);
+                              return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+                            };
+
+                            // Agrupa eventos próximos (mesmo tipo, ±3 minutos) em clusters
+                            const CLUSTER_MS = 3 * 60 * 1000;
+                            const clusters: Array<{type: string, tsMs: number, bikes: string[], count: number, observacoes: string[]}> = [];
+                            events.forEach(ev => {
+                              const last = clusters[clusters.length - 1];
+                              if (last && last.type === ev.type && Math.abs(ev.tsMs - last.tsMs) < CLUSTER_MS) {
+                                last.count++;
+                                if (ev.bikeNumber && !last.bikes.includes(ev.bikeNumber)) last.bikes.push(ev.bikeNumber);
+                                if (ev.observacao && !last.observacoes.includes(ev.observacao)) last.observacoes.push(ev.observacao);
+                                last.tsMs = Math.round((last.tsMs * (last.count - 1) + ev.tsMs) / last.count);
+                              } else {
+                                clusters.push({
+                                  type: ev.type,
+                                  tsMs: ev.tsMs,
+                                  bikes: ev.bikeNumber ? [ev.bikeNumber] : [],
+                                  observacoes: ev.observacao ? [ev.observacao] : [],
+                                  count: 1
+                                });
+                              }
+                            });
+
+                            const dotConfig: Record<string, {bg: string, label: string}> = {
+                              em_posse:      { bg: 'bg-green-500',   label: 'Em Posse' },
+                              recolhida:     { bg: 'bg-green-700',   label: 'Recolhida (Filial)' },
+                              estacao:       { bg: 'bg-indigo-500',  label: 'Estação' },
+                              filial:        { bg: 'bg-blue-500',    label: 'Filial' },
+                              nao_atendida:  { bg: 'bg-yellow-500',  label: 'Não atend.' },
+                              nao_encontrada:{ bg: 'bg-red-500',     label: 'Não enc.' },
+                            };
+
+                            return (
+                              <div className="mb-3">
+                                <div className="flex items-center justify-between mb-1.5">
+                                  <p className="text-[8px] font-black text-gray-400 uppercase tracking-wider">Linha do Tempo</p>
+                                  <button
+                                    onClick={() => setTimelineModal({ driver: driver.name, events: clusters, startMs: startMs!, endMs: endMs! })}
+                                    className="text-[8px] text-blue-500 font-bold hover:underline"
+                                  >⤢ Expandir</button>
+                                </div>
+                                <div className="relative h-5 mx-1">
+                                  <div className="absolute top-2 left-0 right-0 h-px bg-gray-900"/>
+                                  <span className="absolute top-3.5 left-0 text-[7px] text-gray-400 font-mono">{fmtTime(startMs!)}</span>
+                                  <span className="absolute top-3.5 right-0 text-[7px] text-gray-400 font-mono">{fmtTime(endMs!)}</span>
+                                  {clusters.map((cl, ci) => {
+                                    const pos = toPos(cl.tsMs);
+                                    const cfg = dotConfig[cl.type] || { bg: 'bg-gray-400', label: cl.type };
+                                    const isMulti = cl.count > 1;
+                                    return (
+                                      <div key={ci} className="absolute -translate-x-1/2 top-0.5 flex flex-col items-center"
+                                        style={{left: `${pos}%`}}
+                                        title={`${cfg.label}${cl.type === 'em_posse' && cl.bikes.length > 0 ? ` Bike ${cl.bikes.join(', ')}` : isMulti ? ` (${cl.count} bikes)` : ''} — ${fmtTime(cl.tsMs)}`}
+                                      >
+                                        <div className={`rounded-full border-2 border-white shadow-sm flex items-center justify-center ${isMulti ? 'w-4 h-4' : 'w-2.5 h-2.5'} ${cfg.bg}`}>
+                                          {isMulti && <span className="text-[7px] font-black text-white leading-none">{cl.count}</span>}
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                                <div className="flex flex-wrap gap-2 mt-4">
+                                  {Object.entries(dotConfig).map(([k, v]) => (
+                                    <div key={k} className="flex items-center gap-0.5">
+                                      <div className={`w-1.5 h-1.5 rounded-full ${v.bg}`}/>
+                                      <span className="text-[7px] text-gray-400">{v.label}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })()}
                           <div className="grid grid-cols-5 gap-1.5 mb-3">
                             {[
                               { l: 'Notif.', v: driver.pendingRequests, c: 'blue' },
@@ -2278,6 +2550,201 @@ const MainScreen: React.FC<MainScreenProps> = ({
                       </div>
                     ))}
                   </div>
+                </div>
+
+                {/* Quadrante 5: Mecânica */}
+                <div className="min-w-full p-3">
+                  <h2 className="text-base font-bold text-gray-700 flex items-center gap-2 mb-4">
+                    <svg viewBox="0 0 24 24" className="w-4 h-4 text-orange-600" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+                    </svg>
+                    Mecânica
+                  </h2>
+
+                  {/* Totais no mesmo estilo dos cards de motorista */}
+                  <div className="bg-white p-3 rounded-lg border shadow-sm mb-3">
+                    <div className="flex justify-between items-center mb-2 border-b pb-1">
+                      <h3 className="font-black text-gray-900 text-sm uppercase">Visão Geral</h3>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {[
+                        { l: 'Aguardando', v: mechanicsList.filter(b => b.status === 'Aguardando Confirmação').length, c: 'blue' },
+                        { l: 'Manutenção', v: mechanicsList.filter(b => b.status === 'Em Manutenção').length, c: 'orange' },
+                        { l: 'Reserva', v: mechanicsList.filter(b => b.status === 'Reserva').length, c: 'green' },
+                      ].map(item => (
+                        <div key={item.l} className={`bg-${item.c}-50 p-1.5 rounded border border-${item.c}-100 text-center`}>
+                          <p className={`text-[8px] text-${item.c}-600 font-black uppercase leading-tight`}>{item.l}</p>
+                          <p className={`text-sm font-black text-${item.c}-800`}>{item.v}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Card por mecânico */}
+                  {(() => {
+                    const byMechanic: Record<string, {manutencao: number, reserva: number, bikes: string[]}> = {};
+                    mechanicsList.filter(b => b.status === 'Em Manutenção' || b.status === 'Reserva').forEach(b => {
+                      const m = b.mecanico || '—';
+                      if (!byMechanic[m]) byMechanic[m] = { manutencao: 0, reserva: 0, bikes: [] };
+                      if (b.status === 'Em Manutenção') byMechanic[m].manutencao++;
+                      else byMechanic[m].reserva++;
+                      byMechanic[m].bikes.push(b.patrimonio);
+                    });
+                    const mechs = Object.entries(byMechanic);
+                    if (mechs.length === 0) return (
+                      <div className="text-center py-6 bg-white rounded-lg border border-dashed">
+                        <p className="text-gray-400 text-xs">Nenhum mecânico em atividade</p>
+                      </div>
+                    );
+                    return (
+                      <div className="grid grid-cols-1 gap-3">
+                        {mechs.map(([name, data]) => (
+                          <div key={name} className="bg-white p-3 rounded-lg border shadow-sm">
+                            <div className="flex justify-between items-center mb-2 border-b pb-1">
+                              <h3 className="font-black text-gray-900 text-sm uppercase">{name}</h3>
+                            </div>
+                            <div className="grid grid-cols-2 gap-1.5 mb-2">
+                              {[
+                                { l: 'Manutenção', v: data.manutencao, c: 'orange' },
+                                { l: 'Reserva', v: data.reserva, c: 'green' },
+                              ].map(item => (
+                                <div key={item.l} className={`bg-${item.c}-50 p-1.5 rounded border border-${item.c}-100 text-center`}>
+                                  <p className={`text-[8px] text-${item.c}-600 font-black uppercase leading-tight`}>{item.l}</p>
+                                  <p className={`text-sm font-black text-${item.c}-800`}>{item.v}</p>
+                                </div>
+                              ))}
+                            </div>
+                            <div>
+                              <p className="text-[9px] font-black text-gray-500 uppercase mb-1">Bikes ({data.bikes.length})</p>
+                              <div className="flex flex-wrap gap-1">
+                                {mechanicsList.filter(b => (b.status === 'Em Manutenção' || b.status === 'Reserva') && b.mecanico === name).map((b: any) => (
+                                  <span key={b.patrimonio} className={`px-2 py-0.5 rounded text-[10px] font-black font-mono ${
+                                    b.status === 'Em Manutenção'
+                                      ? 'bg-orange-500 text-white'
+                                      : 'bg-green-600 text-white'
+                                  }`}>{b.patrimonio}</span>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Quadrante 6: Pesquisa de Movimentação de Bike */}
+                <div className="min-w-full p-3">
+                  <h2 className="text-base font-bold text-gray-700 flex items-center gap-2 mb-4">
+                    <SearchIcon className="w-4 h-4 text-purple-600"/>
+                    Movimentação de Bike
+                  </h2>
+
+                  {/* Campo de busca */}
+                  <div className="bg-white p-3 rounded-lg border shadow-sm mb-3">
+                    <div className="flex gap-2 mb-3">
+                      <input
+                        type="text"
+                        value={bikeSearchTerm}
+                        onChange={e => setBikeSearchTerm(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && handleBikeMovementSearch()}
+                        placeholder="Digite o patrimônio..."
+                        className="flex-1 p-1.5 border border-gray-300 rounded-md text-sm focus:ring-purple-500 focus:border-purple-500"
+                      />
+                      <button
+                        onClick={handleBikeMovementSearch}
+                        disabled={isBikeSearchLoading || !bikeSearchTerm.trim()}
+                        className="px-3 py-1.5 bg-purple-600 text-white text-xs font-bold rounded-md hover:bg-purple-700 disabled:bg-gray-300 flex items-center gap-1"
+                      >
+                        <SearchIcon className="w-3.5 h-3.5"/>
+                        {isBikeSearchLoading ? 'Buscando...' : 'Consultar'}
+                      </button>
+                    </div>
+                    {/* Seletor de limite */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-[9px] font-black text-gray-400 uppercase">Exibir últimos</span>
+                      <div className="flex bg-gray-100 rounded-full p-0.5 gap-0.5">
+                        {([5, 10, 15] as const).map(n => (
+                          <button key={n} onClick={() => setBikeSearchLimit(n)}
+                            className={`text-[9px] font-black px-2.5 py-0.5 rounded-full transition-all ${bikeSearchLimit === n ? 'bg-purple-600 text-white shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                          >{n} registros</button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Resultados */}
+                  {isBikeSearchLoading && (
+                    <div className="text-center py-6">
+                      <p className="text-xs text-gray-400 animate-pulse">Buscando registros...</p>
+                    </div>
+                  )}
+
+                  {!isBikeSearchLoading && bikeSearchResult.length > 0 && (
+                    <div className="space-y-2">
+                      {bikeSearchResult.map((record: any, i: number) => {
+                        const statusLow = (record.status || '').toLowerCase();
+                        const isMecanicaRecord = record.origem === 'mecanica';
+                        const isRecolhida   = statusLow === 'recolhida' || statusLow === 'filial';
+                        const isEstacao     = statusLow === 'estação' || statusLow === 'estacao';
+                        const isVandalizada = statusLow === 'vandalizada';
+                        const isNaoEnc      = statusLow.includes('não encontrada') || statusLow.includes('nao encontrada');
+                        const isMec         = statusLow.includes('manutenção') || statusLow.includes('manutencao') || statusLow === 'em manutenção';
+                        const isReserva     = statusLow === 'reserva' || statusLow.includes('reparo finalizado');
+                        const isRemanejada  = statusLow === 'remanejada';
+
+                        const badgeClass = isRecolhida ? 'bg-green-700 text-white' :
+                          isEstacao ? 'bg-indigo-500 text-white' :
+                          isVandalizada || isNaoEnc ? 'bg-red-500 text-white' :
+                          isMec ? 'bg-orange-500 text-white' :
+                          isReserva ? 'bg-green-500 text-white' :
+                          isRemanejada ? 'bg-teal-500 text-white' :
+                          'bg-gray-400 text-white';
+
+                        return (
+                          <div key={i} className={`bg-white border rounded-lg p-2.5 shadow-sm ${isMecanicaRecord ? 'border-l-4 border-l-orange-400' : 'border-l-4 border-l-blue-300'}`}>
+                            <div className="flex items-start justify-between gap-2 mb-1.5">
+                              <div className="flex items-center gap-1.5">
+                                <span className={`px-2 py-0.5 text-[9px] font-black uppercase rounded ${badgeClass}`}>
+                                  {record.status}
+                                </span>
+                                {isMecanicaRecord && (
+                                  <span className="px-1.5 py-0.5 text-[8px] font-bold bg-orange-50 text-orange-500 border border-orange-200 rounded">🔧 Mecânica</span>
+                                )}
+                              </div>
+                              <span className="text-[9px] text-gray-800 font-mono font-bold whitespace-nowrap">{record.timestamp}</span>
+                            </div>
+                            {record.motorista && (
+                              <p className="text-[10px] font-semibold text-gray-700">
+                                {isMecanicaRecord ? '🔧' : '👤'} {record.motorista}
+                              </p>
+                            )}
+                            {record.observacao && (
+                              <p className="text-[10px] text-gray-500 mt-0.5">📝 {record.observacao}</p>
+                            )}
+                            {record.bateria && (() => {
+                              // Converte 0.3 → 30%, 0.8 → 80%, já 80% fica 80%
+                              const raw = String(record.bateria).replace(',', '.');
+                              const num = parseFloat(raw);
+                              const pct = !isNaN(num) ? (num <= 1 && num > 0 ? Math.round(num * 100) : Math.round(num)) : null;
+                              return pct !== null ? (
+                                <p className="text-[10px] text-gray-500 mt-0.5">🔋 {pct}%</p>
+                              ) : null;
+                            })()}
+                            {record.localidade && (
+                              <p className="text-[10px] text-gray-400 mt-0.5">📍 {record.localidade}</p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {!isBikeSearchLoading && bikeSearchTerm && bikeSearchResult.length === 0 && (
+                    <div className="text-center py-6 bg-white rounded-lg border border-dashed">
+                      <p className="text-gray-400 text-xs">Nenhum registro encontrado para a bike {bikeSearchTerm}</p>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -2487,6 +2954,119 @@ const MainScreen: React.FC<MainScreenProps> = ({
           </div>
         </div>
       )}
+
+      {/* Modal Timeline Expandida */}
+      {timelineModal && (() => {
+        const { driver, events, startMs, endMs } = timelineModal;
+        const totalMs = endMs - startMs || 1;
+        const toPos = (tsMs: number) => Math.max(0, Math.min(100, (tsMs - startMs) / totalMs * 100));
+        const fmtTime = (ms: number) => {
+          const d = new Date(ms);
+          return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+        };
+        const dotConfig: Record<string, {bg: string, label: string}> = {
+          em_posse:       { bg: 'bg-green-500',  label: 'Em Posse' },
+          recolhida:      { bg: 'bg-green-700',  label: 'Recolhida (Filial)' },
+          estacao:        { bg: 'bg-indigo-500', label: 'Estação' },
+          filial:         { bg: 'bg-blue-500',   label: 'Filial' },
+          nao_atendida:   { bg: 'bg-yellow-500', label: 'Não atend.' },
+          nao_encontrada: { bg: 'bg-red-500',    label: 'Não enc.' },
+        };
+        // Marca de hora a cada 30min
+        const hourMarks: Array<{ms: number, label: string}> = [];
+        const startHour = new Date(startMs);
+        startHour.setMinutes(0, 0, 0);
+        for (let t = startHour.getTime(); t <= endMs; t += 30 * 60 * 1000) {
+          if (t >= startMs) hourMarks.push({ ms: t, label: fmtTime(t) });
+        }
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setTimelineModal(null)}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h2 className="text-lg font-black text-gray-800 uppercase">{driver}</h2>
+                  <p className="text-[10px] text-gray-400">{fmtTime(startMs)} → {fmtTime(endMs)}</p>
+                </div>
+                <button onClick={() => setTimelineModal(null)} className="text-gray-400 hover:text-gray-700 text-xl font-bold">✕</button>
+              </div>
+
+              {/* Linha do tempo expandida */}
+              <div className="relative mb-6" style={{height: '60px'}}>
+                {/* Marcas de hora */}
+                {hourMarks.map((m, i) => (
+                  <div key={i} className="absolute flex flex-col items-center" style={{left: `${toPos(m.ms)}%`}}>
+                    <div className="w-px h-3 bg-gray-200"/>
+                    <span className="text-[8px] text-gray-300 mt-0.5 -translate-x-1/2">{m.label}</span>
+                  </div>
+                ))}
+                {/* Linha base */}
+                <div className="absolute top-3 left-0 right-0 h-0.5 bg-gray-900 rounded"/>
+                {/* Horários extremos */}
+                <span className="absolute top-6 left-0 text-[9px] text-gray-600 font-mono font-bold">{fmtTime(startMs)}</span>
+                <span className="absolute top-6 right-0 text-[9px] text-gray-600 font-mono font-bold">{fmtTime(endMs)}</span>
+                {/* Eventos agrupados */}
+                {events.map((cl: any, ci: number) => {
+                  const pos = toPos(cl.tsMs);
+                  const cfg = dotConfig[cl.type] || { bg: 'bg-gray-400', label: cl.type };
+                  const isMulti = cl.count > 1;
+                  return (
+                    <div key={ci} className="absolute -translate-x-1/2 flex flex-col items-center" style={{left: `${pos}%`, top: 0}}>
+                      <div className={`rounded-full border-2 border-white shadow flex items-center justify-center ${isMulti ? 'w-6 h-6' : 'w-4 h-4'} ${cfg.bg}`}>
+                        {isMulti && <span className="text-[9px] font-black text-white">{cl.count}</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Lista detalhada de eventos */}
+              <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                {events.map((cl: any, ci: number) => {
+                  const cfg = dotConfig[cl.type] || { bg: 'bg-gray-400', label: cl.type };
+                  return (
+                    <div key={ci} className="flex items-start gap-3 p-2.5 bg-gray-50 rounded-lg border">
+                      <div className={`w-2.5 h-2.5 rounded-full mt-1 flex-shrink-0 ${cfg.bg}`}/>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xs font-black text-gray-700">{cfg.label}</span>
+                          {cl.count > 1 && <span className="text-[9px] bg-gray-200 text-gray-600 px-1.5 rounded-full font-bold">{cl.count} bikes</span>}
+                        </div>
+                        {cl.bikes && cl.bikes.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {cl.bikes.map((b: string) => (
+                              <span key={b} className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${
+                                cl.type === 'em_posse' ? 'bg-green-50 border-green-200 text-green-700' :
+                                cl.type === 'recolhida' ? 'bg-green-100 border-green-300 text-green-800' :
+                                cl.type === 'estacao' ? 'bg-indigo-50 border-indigo-200 text-indigo-700' :
+                                cl.type === 'filial' ? 'bg-blue-50 border-blue-200 text-blue-700' :
+                                'bg-gray-100 border-gray-200 text-gray-600'
+                              }`}>{b}</span>
+                            ))}
+                          </div>
+                        )}
+                        {cl.observacoes && cl.observacoes.filter(Boolean).length > 0 && cl.type !== 'em_posse' && (
+                          <p className="text-[8px] text-gray-400 mt-0.5 italic">{cl.observacoes.filter(Boolean).join(' · ')}</p>
+                        )}
+                      </div>
+                      <span className="text-[10px] text-gray-500 font-mono font-bold flex-shrink-0">{fmtTime(cl.tsMs)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Legenda */}
+              <div className="flex flex-wrap gap-3 mt-4 pt-3 border-t">
+                {Object.entries(dotConfig).map(([k, v]) => (
+                  <div key={k} className="flex items-center gap-1">
+                    <div className={`w-2 h-2 rounded-full ${v.bg}`}/>
+                    <span className="text-[9px] text-gray-500">{v.label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       <RequestModal isOpen={isRequestModalOpen} onClose={() => setRequestModalOpen(false)} onSubmit={handleCreateRequest} isLoading={isLoading} motoristas={motoristas} driverLocations={driverLocations} error={error} clearError={() => setError(null)}/>
       <EditDriverModal isOpen={isEditDriverModalOpen} onClose={() => setIsEditDriverModalOpen(false)} driver={editingDriver} onSave={handleUpdateDriverState} isLoading={isLoading}/>
