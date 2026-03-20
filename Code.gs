@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '81.7-mechanics-manual';
+const BACKEND_VERSION = '82.0-mechanics-904';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -2653,7 +2653,8 @@ function getMechanicsList() {
   // Chave: patrimônio normalizado → dados da bike
   const bikeMap = {};
 
-  // 1. Lê a aba Mecânica — apenas bikes com data >= corte OU Em Manutenção/Reserva ativas
+  // 1. Lê a aba Mecânica — fonte de verdade para o fluxo
+  //    Qualquer bike registrada na aba Mecânica aparece, independente do Relatório
   if (sheet) {
     sheet.getDataRange().getValues().slice(1).forEach((row, idx) => {
       const pat    = String(row[COLUMN_INDICES.MECHANICS.PATRIMONIO - 1] || '').trim().replace(/^0+/, '');
@@ -2661,41 +2662,40 @@ function getMechanicsList() {
       if (!pat || status === 'Remanejada') return;
 
       const tsMs = toMs(row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1]);
-      const isActiveStatus = status === 'Em Manutenção' || status === 'Reserva';
 
-      // Regra de corte:
-      // - Se tem data válida e é antes de 20/03/2026 → só mostra se for status ativo (Em Manutenção/Reserva)
-      // - Se não tem data válida (tsMs=null) → só mostra se for status ativo
-      // - Se tem data >= corte → sempre mostra
-      if (tsMs !== null && tsMs < CUTOFF_MS && !isActiveStatus) return;
-      if (tsMs === null && !isActiveStatus) return;
+      // Filtro de data de corte — ignora registros antes de 20/03/2026
+      if (tsMs !== null && tsMs < CUTOFF_MS) return;
+      if (tsMs === null) return;
 
       const info = bikeInfoMap[pat] || {};
+      const tratativa = (row[COLUMN_INDICES.MECHANICS.TRATATIVA - 1] || '').toString().trim();
       const entry = {
         row: idx + 2, patrimonio: pat, status,
         dataEntrada:     row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1],
         mecanico:        row[COLUMN_INDICES.MECHANICS.MECANICO - 1],
-        tratativa:       row[COLUMN_INDICES.MECHANICS.TRATATIVA - 1],
+        tratativa:       tratativa,
         dataFinalizacao: row[COLUMN_INDICES.MECHANICS.DATA_FINALIZACAO - 1],
         carretinha:      row[COLUMN_INDICES.MECHANICS.CARRETINHA - 1],
         bateria: info.bateria, carregamento: info.carregamento,
-        manual: (row[COLUMN_INDICES.MECHANICS.TRATATIVA - 1] || '').toString().trim().toUpperCase() === 'MANUAL',
+        manual: tratativa.toUpperCase() === 'MANUAL',
         tsMs: tsMs || 0
       };
 
-      // Deduplicação: mantém a entrada mais recente por patrimônio
       if (!bikeMap[pat] || entry.tsMs > (bikeMap[pat].tsMs || 0)) {
         bikeMap[pat] = entry;
       }
     });
   }
 
+  // Set de bikes já na aba Mecânica — o Relatório não sobrescreve estas
+  const mechanicsSheetBikes = new Set(Object.keys(bikeMap));
+
   // 2. Busca do Relatório — só bikes cujo ÚLTIMO status >= corte é Recolhida ou Vandalizada
   try {
     const reportSheet = ss.getSheetByName(REPORT_SHEET_NAME);
     if (reportSheet && reportSheet.getLastRow() > 1) {
       const lastRow = reportSheet.getLastRow();
-      const rowsToRead = Math.min(lastRow - 1, 5000);
+      const rowsToRead = Math.min(lastRow - 1, 8000);
       const reportData = reportSheet.getRange(lastRow - rowsToRead + 1, 1, rowsToRead, 5).getValues();
 
       // Monta histórico por bike — apenas registros >= corte
@@ -2717,27 +2717,19 @@ function getMechanicsList() {
         'não atendida', 'nao atendida', 'recuperada', 'inicio_turno', 'fim_turno'
       ]);
 
-      // Para bikes já na aba Mecânica com status Aguardando Confirmação:
-      // verifica se houve saída no Relatório APÓS a data de entrada na mecânica
-      // Se sim, a bike já foi resolvida — remove do bikeMap
-      Object.keys(bikeMap).forEach(pat => {
-        const existing = bikeMap[pat];
-        if (existing.status !== 'Aguardando Confirmação') return;
-        const entryTsMs = existing.tsMs || 0;
-        const history = bikeHistory[pat];
-        if (!history) return;
-        const hasExitAfterEntry = history.some(h => h.tsMs > entryTsMs && EXIT_STATUSES.has(h.status));
-        if (hasExitAfterEntry) delete bikeMap[pat];
-      });
+      // Para bikes do Relatório (não da aba Mecânica): verifica se houve saída posterior
+      // Bikes da aba Mecânica nunca são removidas automaticamente — o mecânico decidiu inserir
 
       // Verifica se o ÚLTIMO registro de cada bike é Recolhida ou Vandalizada
       Object.entries(bikeHistory).forEach(([pat, history]) => {
+        // Se já está na aba Mecânica — não adiciona do Relatório
+        if (mechanicsSheetBikes.has(pat)) return;
+
         history.sort((a, b) => a.tsMs - b.tsMs);
         const last = history[history.length - 1];
-        if (last.status !== 'recolhida' && last.status !== 'vandalizada') return;
 
-        // Se já está na aba Mecânica com qualquer status — não adiciona do Relatório
-        if (bikeMap[pat]) return;
+        // Último status deve ser Recolhida ou Vandalizada
+        if (last.status !== 'recolhida' && last.status !== 'vandalizada') return;
 
         const info = bikeInfoMap[pat] || {};
         bikeMap[pat] = {
