@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '81.1-mechanics-fix';
+const BACKEND_VERSION = '81.3-route-fix';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -312,6 +312,8 @@ function doPost(e) {
       case 'getRouteDetails':       response = { ...getRouteDetails(request.driverName, request.bikeNumbers), version: BACKEND_VERSION }; break;
       case 'switchVehicle':         response = { ...switchVehicle(request.driverName, request.plate, request.kmInicial), version: BACKEND_VERSION }; break;
       case 'sync':                  response = { ...handleSync(request), version: BACKEND_VERSION }; break;
+      case 'getBicycles':           response = { ...getBicycles(), version: BACKEND_VERSION }; break;
+      case 'generateDriverRoute':   response = { ...generateDriverRoute(request.driverName, request.location, request.filters, request.maxBikes, request.rangeKm), version: BACKEND_VERSION }; break;
       case 'exportAllData':         response = { ...handleExportAllData(request), version: BACKEND_VERSION }; break;
       case 'saveDailySummary':      response = { ...saveDailySummary(request.summaryData), version: BACKEND_VERSION }; break;
       case 'getAdminAlerts':        response = { ...getAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
@@ -357,6 +359,124 @@ function logOperationToQueue(action, payload) {
 // CORREÇÃO: handleSync não retorna driverState do Sheets quando
 // Firebase é a fonte de verdade. O app usa o estado local do Firebase.
 // =================================================================
+// =================================================================
+// --- GERAÇÃO DE ROTA AUTOMÁTICA ---
+// =================================================================
+function getBicycles() {
+  try {
+    const sheet = getSpreadsheet().getSheetByName(BIKES_SHEET_NAME);
+    if (!sheet) throw new Error(`Planilha "${BIKES_SHEET_NAME}" não encontrada.`);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return { success: true, data: [] };
+    const data = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+    const bikes = data.map(row => ({
+      patrimonio: row[COLUMN_INDICES.BIKES.PATRIMONIO - 1],
+      status: row[COLUMN_INDICES.BIKES.STATUS - 1],
+      latitude: parseCoordinate(row[COLUMN_INDICES.BIKES.LATITUDE - 1]),
+      longitude: parseCoordinate(row[COLUMN_INDICES.BIKES.LONGITUDE - 1]),
+      bateria: row[COLUMN_INDICES.BIKES.BATERIA - 1],
+      trava: row[COLUMN_INDICES.BIKES.TRAVA - 1],
+      ultimaInfo: row[COLUMN_INDICES.BIKES.ULTIMA_INFO - 1],
+      localidade: row[COLUMN_INDICES.BIKES.LOCALIDADE - 1]
+    })).filter(b => b.patrimonio && !isNaN(b.latitude) && !isNaN(b.longitude));
+    return { success: true, data: bikes };
+  } catch (e) {
+    return { success: false, error: 'Erro ao buscar bicicletas: ' + e.message };
+  }
+}
+
+function calculateDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function generateDriverRoute(driverName, location, filters, maxBikes, rangeKm) {
+  maxBikes = maxBikes || 20;
+  rangeKm = rangeKm || 3;
+  try {
+    if (!driverName || !location || !location.lat || !location.lng) {
+      return { success: false, error: 'Dados de localização ou motorista ausentes.' };
+    }
+
+    const bikesResult = getBicycles();
+    if (!bikesResult.success) return bikesResult;
+    const allBikes = bikesResult.data;
+
+    const stationsResult = getStations();
+    if (!stationsResult.success) return stationsResult;
+    const allStations = stationsResult.data;
+
+    const now = new Date();
+    const thirtyMinutesAgo = new Date(now.getTime() - 30 * 60000);
+
+    const filteredBikes = allBikes.filter(bike => {
+      const lastInfo = parseTimestamp(bike.ultimaInfo);
+      const isOffline = !lastInfo || lastInfo < thirtyMinutesAgo;
+
+      if (filters.offline) {
+        if (!isOffline) return false;
+      } else {
+        if (isOffline) return false;
+      }
+
+      let matchesAnyFilter = false;
+      const isAtStation = allStations.some(s =>
+        calculateDistance(s.Latitude, s.Longitude, bike.latitude, bike.longitude) < 0.05
+      );
+      const isOutOfStation = !isAtStation;
+
+      const batVal = parseFloat(String(bike.bateria).replace('%','').replace(',','.')) || 0;
+      const bateria = batVal <= 1 ? Math.round(batVal * 100) : Math.round(batVal);
+
+      if (filters.lowBattery && bateria < 50) matchesAnyFilter = true;
+      if (filters.openLock && (bike.trava || '').toString().toUpperCase() === 'ABERTA') matchesAnyFilter = true;
+      if (filters.wrongStatus && (bike.status || '').toString().toLowerCase() !== 'ativo') matchesAnyFilter = true;
+      if (filters.offline) matchesAnyFilter = true;
+      if (filters.outOfStation && isOutOfStation) matchesAnyFilter = true;
+
+      if (!matchesAnyFilter) return false;
+      if (filters.outOfStation && isAtStation) return false;
+
+      const distToDriver = calculateDistance(location.lat, location.lng, bike.latitude, bike.longitude);
+      if (distToDriver > rangeKm) return false;
+
+      bike.distance = distToDriver;
+      return true;
+    });
+
+    const route = filteredBikes
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, maxBikes);
+
+    if (route.length === 0) {
+      return { success: true, data: [], message: 'Nenhuma bicicleta encontrada com os critérios selecionados.' };
+    }
+
+    // Cria solicitação na planilha
+    const requestSheet = getSpreadsheet().getSheetByName(REQUESTS_SHEET_NAME);
+    if (requestSheet) {
+      const patrimonios = route.map(b => b.patrimonio).join(', ');
+      const newRow = new Array(requestSheet.getLastColumn()).fill('');
+      newRow[COLUMN_INDICES.REQUESTS.TIMESTAMP - 1]    = new Date();
+      newRow[COLUMN_INDICES.REQUESTS.PATRIMONIO - 1]   = patrimonios;
+      newRow[COLUMN_INDICES.REQUESTS.OCORRENCIA - 1]   = 'ROTEIRO GERADO';
+      newRow[COLUMN_INDICES.REQUESTS.LOCAL - 1]        = 'Criado via Roteiro Automático';
+      newRow[COLUMN_INDICES.REQUESTS.SITUACAO - 1]     = STATUS.PENDENTE;
+      newRow[COLUMN_INDICES.REQUESTS.DESTINATARIO - 1] = driverName;
+      requestSheet.appendRow(newRow);
+    }
+
+    return { success: true, data: route, message: `Roteiro gerado com ${route.length} bicicletas.` };
+  } catch (e) {
+    return { success: false, error: 'Erro ao gerar roteiro: ' + e.message };
+  }
+}
+
 function handleSync(request) {
   const { driverName, category, summaryTimeRange, statusTimeRange } = request;
   const catNorm = normalizeCategory(category);
@@ -2496,7 +2616,10 @@ function getMechanicsList() {
     } catch (e) {}
   }
 
-  // Mapa de bateria/carregamento das bikes
+  // Data de corte — só mostra bikes a partir de 20/03/2026
+  const CUTOFF_MS = new Date('2026-03-20T00:00:00').getTime();
+
+  // Mapa de bateria/carregamento
   const bikeIndex = getBikeIndex();
   const bikeInfoMap = {};
   Object.entries(bikeIndex).forEach(([pat, row]) => {
@@ -2506,44 +2629,63 @@ function getMechanicsList() {
     bikeInfoMap[pat] = { bateria, carregamento: row[COLUMN_INDICES.BIKES.CARREGAMENTO - 1] };
   });
 
-  // 1. Lê o que já está na aba Mecânica (processado manualmente pelo mecânico)
-  const results = [];
-  const existingBikes = new Set();
-  const lastHandledTimestamp = {};
+  // Helper: converte qualquer valor de data para ms
+  const toMs = (raw) => {
+    if (!raw) return null;
+    if (raw instanceof Date) return raw.getTime();
+    const s = raw.toString().trim();
+    if (!s) return null;
+    // Formato BR: DD/MM/YYYY HH:mm:ss
+    if (s.includes('/')) {
+      const parts = s.split(' ');
+      const dp = parts[0].split('/');
+      if (dp.length === 3) {
+        const d = new Date(`${dp[2]}-${dp[1]}-${dp[0]}${parts[1] ? 'T' + parts[1] : ''}`);
+        return isNaN(d.getTime()) ? null : d.getTime();
+      }
+    }
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? null : d.getTime();
+  };
 
+  // Mapa final por patrimônio — garante deduplicação
+  // Chave: patrimônio normalizado → dados da bike
+  const bikeMap = {};
+
+  // 1. Lê a aba Mecânica — apenas bikes com data >= corte OU sem data (processadas manualmente)
   if (sheet) {
     sheet.getDataRange().getValues().slice(1).forEach((row, idx) => {
-      const pat    = String(row[COLUMN_INDICES.MECHANICS.PATRIMONIO - 1]).trim().replace(/^0+/, '');
+      const pat    = String(row[COLUMN_INDICES.MECHANICS.PATRIMONIO - 1] || '').trim().replace(/^0+/, '');
       const status = (row[COLUMN_INDICES.MECHANICS.STATUS - 1] || '').toString().trim();
       if (!pat || status === 'Remanejada') return;
 
+      const tsMs = toMs(row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1]);
+
+      // Filtra pela data de corte — ignora entradas antigas (antes de 20/03/2026)
+      // Exceto se estiver Em Manutenção ou Reserva (processamento em andamento)
+      const isActiveStatus = status === 'Em Manutenção' || status === 'Reserva';
+      if (tsMs && tsMs < CUTOFF_MS && !isActiveStatus) return;
+
       const info = bikeInfoMap[pat] || {};
-      results.push({
+      const entry = {
         row: idx + 2, patrimonio: pat, status,
         dataEntrada:     row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1],
         mecanico:        row[COLUMN_INDICES.MECHANICS.MECANICO - 1],
         tratativa:       row[COLUMN_INDICES.MECHANICS.TRATATIVA - 1],
         dataFinalizacao: row[COLUMN_INDICES.MECHANICS.DATA_FINALIZACAO - 1],
         carretinha:      row[COLUMN_INDICES.MECHANICS.CARRETINHA - 1],
-        bateria: info.bateria, carregamento: info.carregamento
-      });
-      existingBikes.add(pat);
+        bateria: info.bateria, carregamento: info.carregamento,
+        tsMs: tsMs || 0
+      };
 
-      const ts = row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1];
-      if (ts instanceof Date && (!lastHandledTimestamp[pat] || ts > lastHandledTimestamp[pat])) {
-        lastHandledTimestamp[pat] = ts;
+      // Deduplicação: mantém a entrada mais recente por patrimônio
+      if (!bikeMap[pat] || entry.tsMs > (bikeMap[pat].tsMs || 0)) {
+        bikeMap[pat] = entry;
       }
     });
   }
 
-  // 2. Busca bikes recentes do Relatório com status Recolhida ou Vandalizada APENAS.
-  //    REGRA: Estação = remanejamento (NÃO vai para a mecânica).
-  //           Recolhida = bike veio para a filial (VAI para a mecânica).
-  //           Vandalizada = bike com dano (VAI para a mecânica).
-  //    DATA DE CORTE: apenas registros a partir de 20/03/2026.
-  //    Usa timestamp numérico para evitar problemas de timezone.
-  const MECHANICS_CUTOFF_MS = new Date('2026-03-20T00:00:00').getTime();
-
+  // 2. Busca do Relatório — só bikes cujo ÚLTIMO status >= corte é Recolhida ou Vandalizada
   try {
     const reportSheet = ss.getSheetByName(REPORT_SHEET_NAME);
     if (reportSheet && reportSheet.getLastRow() > 1) {
@@ -2551,61 +2693,53 @@ function getMechanicsList() {
       const rowsToRead = Math.min(lastRow - 1, 5000);
       const reportData = reportSheet.getRange(lastRow - rowsToRead + 1, 1, rowsToRead, 5).getValues();
 
-      // Monta histórico completo por bike com timestamp real
-      // Só considera registros a partir de 20/03/2026
-      const bikeHistory = {}; // pat -> [{tsMs, status}]
-
+      // Monta histórico por bike — apenas registros >= corte
+      const bikeHistory = {};
       reportData.forEach(row => {
-        const raw = row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1];
-        if (!raw) return;
-
-        // Converte para ms — suporta Date nativo (Apps Script) e string BR
-        let tsMs;
-        if (raw instanceof Date) {
-          tsMs = raw.getTime();
-        } else {
-          const parsed = parseTimestamp(raw);
-          if (!parsed) return;
-          tsMs = parsed.getTime();
-        }
-
-        if (tsMs < MECHANICS_CUTOFF_MS) return; // ignora antes de 20/03/2026
-
+        const tsMs = toMs(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
+        if (!tsMs || tsMs < CUTOFF_MS) return;
         const pat = String(row[COLUMN_INDICES.REPORTS.PATRIMONIO - 1] || '').trim().replace(/^0+/, '');
         if (!pat) return;
         const status = (row[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim().toLowerCase();
         if (!status) return;
-
         if (!bikeHistory[pat]) bikeHistory[pat] = [];
         bikeHistory[pat].push({ tsMs, status });
       });
 
-      // Para cada bike, ordena por timestamp e verifica se o ÚLTIMO registro
-      // é Recolhida ou Vandalizada — se sim, aparece na mecânica
+      // Verifica se o ÚLTIMO registro de cada bike é Recolhida ou Vandalizada
       Object.entries(bikeHistory).forEach(([pat, history]) => {
         history.sort((a, b) => a.tsMs - b.tsMs);
         const last = history[history.length - 1];
-        const isEntry = last.status === 'recolhida' || last.status === 'vandalizada';
-        if (!isEntry) return;
+        if (last.status !== 'recolhida' && last.status !== 'vandalizada') return;
 
-        if (existingBikes.has(pat)) {
-          const lastHandled = lastHandledTimestamp[pat];
-          if (lastHandled && last.tsMs <= lastHandled.getTime()) return;
+        // Só adiciona se não está já no bikeMap com status ativo
+        if (bikeMap[pat]) {
+          const existing = bikeMap[pat];
+          // Se já está Em Manutenção ou Reserva — não sobrescreve
+          if (existing.status === 'Em Manutenção' || existing.status === 'Reserva') return;
+          // Se a entrada da aba Mecânica é mais recente — não sobrescreve
+          if (existing.tsMs >= last.tsMs) return;
         }
 
         const info = bikeInfoMap[pat] || {};
-        results.push({
+        bikeMap[pat] = {
           row: -1, patrimonio: pat, status: 'Aguardando Confirmação',
           dataEntrada: new Date(last.tsMs), mecanico: '', tratativa: '',
           dataFinalizacao: '', carretinha: '',
-          bateria: info.bateria, carregamento: info.carregamento
-        });
-        existingBikes.add(pat);
+          bateria: info.bateria, carregamento: info.carregamento,
+          tsMs: last.tsMs
+        };
       });
     }
   } catch (e) {
     console.error('getMechanicsList - erro ao ler relatório:', e);
   }
+
+  // Remove campo interno tsMs antes de retornar
+  const results = Object.values(bikeMap).map(b => {
+    const { tsMs, ...rest } = b;
+    return rest;
+  });
 
   return { success: true, data: results };
 }
