@@ -1933,7 +1933,12 @@ const MainScreen: React.FC<MainScreenProps> = ({
                     {mechanicsList.filter(b => b.status === 'Aguardando Confirmação').map((bike, i) => (
                       <div key={`mec-filial-${bike.patrimonio}-${i}`} className="flex justify-between items-center p-3 bg-white border rounded-md shadow-sm">
                         <div>
-                          <span className="font-bold text-gray-700">Bike: {bike.patrimonio}</span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-gray-700">Bike: {bike.patrimonio}</span>
+                            {bike.manual && (
+                              <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-[8px] font-black uppercase rounded border border-purple-200">Manual</span>
+                            )}
+                          </div>
                           <div className="flex flex-wrap gap-x-2 gap-y-0.5">
                             {bike.bateria !== undefined && <p className="text-[10px] text-gray-600">Bateria: {bike.bateria}%</p>}
                             {bike.carregamento && <p className="text-[10px] text-green-600 font-bold">⚡ Carregando</p>}

@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '81.5-mechanics-columns';
+const BACKEND_VERSION = '81.7-mechanics-manual';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -320,6 +320,7 @@ function doPost(e) {
       case 'clearAdminAlerts':      response = { ...clearAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
       case 'getMechanicsList':      response = { ...getMechanicsList(), version: BACKEND_VERSION }; break;
       case 'confirmMechanicsReceipt': response = { ...confirmMechanicsReceipt(request.bikeNumber, request.mechanicName), version: BACKEND_VERSION }; break;
+      case 'insertBikeMechanics':   response = { ...insertBikeMechanics(request.bikeNumber, request.driverName, request.targetStatus), version: BACKEND_VERSION }; break;
       case 'finalizeMechanicsRepair': response = { ...finalizeMechanicsRepair(request.bikeNumber, request.mechanicName, request.treatment), version: BACKEND_VERSION }; break;
       case 'organizeTrailer':       response = { ...organizeTrailer(request.bikeNumbers, request.trailerName), version: BACKEND_VERSION }; break;
       case 'finalizeTrailer':       response = { ...finalizeTrailer(request.trailerName), version: BACKEND_VERSION }; break;
@@ -2678,6 +2679,7 @@ function getMechanicsList() {
         dataFinalizacao: row[COLUMN_INDICES.MECHANICS.DATA_FINALIZACAO - 1],
         carretinha:      row[COLUMN_INDICES.MECHANICS.CARRETINHA - 1],
         bateria: info.bateria, carregamento: info.carregamento,
+        manual: (row[COLUMN_INDICES.MECHANICS.TRATATIVA - 1] || '').toString().trim().toUpperCase() === 'MANUAL',
         tsMs: tsMs || 0
       };
 
@@ -2709,6 +2711,25 @@ function getMechanicsList() {
         bikeHistory[pat].push({ tsMs, status });
       });
 
+      // Statuses que indicam saída da mecânica (bike foi para estação ou descartada)
+      const EXIT_STATUSES = new Set([
+        'estação', 'estacao', 'não encontrada', 'nao encontrada',
+        'não atendida', 'nao atendida', 'recuperada', 'inicio_turno', 'fim_turno'
+      ]);
+
+      // Para bikes já na aba Mecânica com status Aguardando Confirmação:
+      // verifica se houve saída no Relatório APÓS a data de entrada na mecânica
+      // Se sim, a bike já foi resolvida — remove do bikeMap
+      Object.keys(bikeMap).forEach(pat => {
+        const existing = bikeMap[pat];
+        if (existing.status !== 'Aguardando Confirmação') return;
+        const entryTsMs = existing.tsMs || 0;
+        const history = bikeHistory[pat];
+        if (!history) return;
+        const hasExitAfterEntry = history.some(h => h.tsMs > entryTsMs && EXIT_STATUSES.has(h.status));
+        if (hasExitAfterEntry) delete bikeMap[pat];
+      });
+
       // Verifica se o ÚLTIMO registro de cada bike é Recolhida ou Vandalizada
       Object.entries(bikeHistory).forEach(([pat, history]) => {
         history.sort((a, b) => a.tsMs - b.tsMs);
@@ -2716,7 +2737,6 @@ function getMechanicsList() {
         if (last.status !== 'recolhida' && last.status !== 'vandalizada') return;
 
         // Se já está na aba Mecânica com qualquer status — não adiciona do Relatório
-        // A aba Mecânica é a fonte de verdade para o fluxo da bike
         if (bikeMap[pat]) return;
 
         const info = bikeInfoMap[pat] || {};
@@ -2725,6 +2745,7 @@ function getMechanicsList() {
           dataEntrada: new Date(last.tsMs), mecanico: '', tratativa: '',
           dataFinalizacao: '', carretinha: '',
           bateria: info.bateria, carregamento: info.carregamento,
+          manual: false,
           tsMs: last.tsMs
         };
       });
@@ -2740,6 +2761,32 @@ function getMechanicsList() {
   });
 
   return { success: true, data: results };
+}
+
+function insertBikeMechanics(bikeNumber, mechanicName, targetStatus) {
+  const sheet = getSpreadsheet().getSheetByName(MECHANICS_SHEET_NAME);
+  if (!sheet) return { success: false, error: 'Planilha Mecânica não encontrada.' };
+
+  const pStr = String(bikeNumber).trim().replace(/^0+/, '');
+  const data = sheet.getDataRange().getValues();
+
+  // Verifica se já existe entrada ativa
+  for (let i = 1; i < data.length; i++) {
+    const rowPat = String(data[i][COLUMN_INDICES.MECHANICS.PATRIMONIO - 1]).trim().replace(/^0+/, '');
+    const rowStatus = (data[i][COLUMN_INDICES.MECHANICS.STATUS - 1] || '').toString().trim();
+    if (rowPat === pStr && rowStatus !== 'Remanejada') {
+      // Atualiza entrada existente
+      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.STATUS).setValue(targetStatus);
+      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.MECANICO).setValue(mechanicName);
+      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.DATA_ENTRADA).setValue(new Date());
+      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.TRATATIVA).setValue('MANUAL');
+      return { success: true };
+    }
+  }
+
+  // Insere nova linha — TRATATIVA = 'MANUAL' para identificar inserção manual
+  sheet.appendRow([bikeNumber, targetStatus, new Date(), mechanicName, 'MANUAL', '', '']);
+  return { success: true };
 }
 
 function confirmMechanicsReceipt(bikeNumber, mechanicName) {
