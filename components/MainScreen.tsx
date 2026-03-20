@@ -17,7 +17,7 @@ import { waitForAuth } from '../firebase';
 import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
 import {
   collection, onSnapshot, query, doc, updateDoc, addDoc,
-  serverTimestamp, getDoc, setDoc, deleteDoc, getDocs
+  serverTimestamp, getDoc, setDoc, deleteDoc, getDocs, where
 } from 'firebase/firestore';
 import ScheduleModal from './ScheduleModal';
 import ReporModal from './ReporModal';
