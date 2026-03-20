@@ -212,8 +212,17 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const [searchedBike, setSearchedBike] = useState<BicycleData | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [activeMechanicCategory, setActiveMechanicCategory] = useState<string | null>(null);
-  const [clickedBikesForStatus, setClickedBikesForStatus] = useState<Set<string>>(new Set());
-  const [formattedBikesForCopy, setFormattedBikesForCopy] = useState<string>('');
+  const [clickedBikesForStatus, setClickedBikesForStatus] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem(`status_clicked_${driverName}`);
+      return saved ? new Set(JSON.parse(saved)) : new Set();
+    } catch { return new Set(); }
+  });
+  const [formattedBikesForCopy, setFormattedBikesForCopy] = useState<string>(() => {
+    try {
+      return localStorage.getItem(`status_copy_${driverName}`) || '';
+    } catch { return ''; }
+  });
 
   // --- Refs ---
   const scannerRef = useRef<Html5Qrcode | null>(null);
@@ -1049,14 +1058,15 @@ const MainScreen: React.FC<MainScreenProps> = ({
     setClickedBikesForStatus(prev => {
       const next = new Set(prev);
       next.add(bikeId);
+      try { localStorage.setItem(`status_clicked_${driverName}`, JSON.stringify([...next])); } catch {}
       return next;
     });
     setFormattedBikesForCopy(prev => {
-      const bikes = prev ? prev.split(',').map(b => b.trim()) : [];
-      if (!bikes.includes(bikeId)) {
-        bikes.push(bikeId);
-      }
-      return bikes.join(',');
+      const bikes = prev ? prev.split(',').map(b => b.trim()).filter(Boolean) : [];
+      if (!bikes.includes(bikeId)) bikes.push(bikeId);
+      const next = bikes.join(',');
+      try { localStorage.setItem(`status_copy_${driverName}`, next); } catch {}
+      return next;
     });
   };
 
@@ -1638,6 +1648,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
               onClick={() => {
                 setFormattedBikesForCopy('');
                 setClickedBikesForStatus(new Set());
+                try { localStorage.removeItem(`status_clicked_${driverName}`); localStorage.removeItem(`status_copy_${driverName}`); } catch {}
               }}
               className="px-3 py-1 bg-gray-200 text-gray-600 text-[10px] font-bold rounded hover:bg-gray-300"
             >
