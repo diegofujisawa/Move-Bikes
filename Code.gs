@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '82.0-mechanics-904';
+const BACKEND_VERSION = '82.2-mechanics-clean';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -2617,7 +2617,6 @@ function getMechanicsList() {
     } catch (e) {}
   }
 
-  // Data de corte — só mostra bikes a partir de 20/03/2026
   const CUTOFF_MS = new Date('2026-03-20T00:00:00').getTime();
 
   // Mapa de bateria/carregamento
@@ -2636,7 +2635,6 @@ function getMechanicsList() {
     if (raw instanceof Date) return raw.getTime();
     const s = raw.toString().trim();
     if (!s) return null;
-    // Formato BR: DD/MM/YYYY HH:mm:ss
     if (s.includes('/')) {
       const parts = s.split(' ');
       const dp = parts[0].split('/');
@@ -2649,48 +2647,23 @@ function getMechanicsList() {
     return isNaN(d.getTime()) ? null : d.getTime();
   };
 
-  // Mapa final por patrimônio — garante deduplicação
-  // Chave: patrimônio normalizado → dados da bike
-  const bikeMap = {};
+  // =================================================================
+  // LÓGICA:
+  // - Aguardando Confirmação → vem SOMENTE do Relatório (Recolhida/Vandalizada como último status)
+  // - Em Manutenção / Reserva → vem da aba Mecânica (mecânico processa manualmente)
+  // - Inserção manual via app → aparece com badge Manual
+  // - A aba Mecânica NÃO registra "Aguardando Confirmação" — só Em Manutenção em diante
+  // =================================================================
 
-  // 1. Lê a aba Mecânica — fonte de verdade para o fluxo
-  //    Qualquer bike registrada na aba Mecânica aparece, independente do Relatório
-  if (sheet) {
-    sheet.getDataRange().getValues().slice(1).forEach((row, idx) => {
-      const pat    = String(row[COLUMN_INDICES.MECHANICS.PATRIMONIO - 1] || '').trim().replace(/^0+/, '');
-      const status = (row[COLUMN_INDICES.MECHANICS.STATUS - 1] || '').toString().trim();
-      if (!pat || status === 'Remanejada') return;
+  // Passo 1: Relatório — última ocorrência de Recolhida/Vandalizada por bike
+  // Se após a última Recolhida existir saída (Estação, etc.), bike não aparece
+  const reportEntries = {};
+  const lastStatusByBike = {};
+  const EXIT_STATUSES = new Set([
+    'estação', 'estacao', 'não encontrada', 'nao encontrada',
+    'não atendida', 'nao atendida', 'inicio_turno', 'fim_turno'
+  ]);
 
-      const tsMs = toMs(row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1]);
-
-      // Filtro de data de corte — ignora registros antes de 20/03/2026
-      if (tsMs !== null && tsMs < CUTOFF_MS) return;
-      if (tsMs === null) return;
-
-      const info = bikeInfoMap[pat] || {};
-      const tratativa = (row[COLUMN_INDICES.MECHANICS.TRATATIVA - 1] || '').toString().trim();
-      const entry = {
-        row: idx + 2, patrimonio: pat, status,
-        dataEntrada:     row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1],
-        mecanico:        row[COLUMN_INDICES.MECHANICS.MECANICO - 1],
-        tratativa:       tratativa,
-        dataFinalizacao: row[COLUMN_INDICES.MECHANICS.DATA_FINALIZACAO - 1],
-        carretinha:      row[COLUMN_INDICES.MECHANICS.CARRETINHA - 1],
-        bateria: info.bateria, carregamento: info.carregamento,
-        manual: tratativa.toUpperCase() === 'MANUAL',
-        tsMs: tsMs || 0
-      };
-
-      if (!bikeMap[pat] || entry.tsMs > (bikeMap[pat].tsMs || 0)) {
-        bikeMap[pat] = entry;
-      }
-    });
-  }
-
-  // Set de bikes já na aba Mecânica — o Relatório não sobrescreve estas
-  const mechanicsSheetBikes = new Set(Object.keys(bikeMap));
-
-  // 2. Busca do Relatório — só bikes cujo ÚLTIMO status >= corte é Recolhida ou Vandalizada
   try {
     const reportSheet = ss.getSheetByName(REPORT_SHEET_NAME);
     if (reportSheet && reportSheet.getLastRow() > 1) {
@@ -2698,8 +2671,6 @@ function getMechanicsList() {
       const rowsToRead = Math.min(lastRow - 1, 8000);
       const reportData = reportSheet.getRange(lastRow - rowsToRead + 1, 1, rowsToRead, 5).getValues();
 
-      // Monta histórico por bike — apenas registros >= corte
-      const bikeHistory = {};
       reportData.forEach(row => {
         const tsMs = toMs(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
         if (!tsMs || tsMs < CUTOFF_MS) return;
@@ -2707,52 +2678,99 @@ function getMechanicsList() {
         if (!pat) return;
         const status = (row[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim().toLowerCase();
         if (!status) return;
-        if (!bikeHistory[pat]) bikeHistory[pat] = [];
-        bikeHistory[pat].push({ tsMs, status });
+
+        // Último status geral
+        if (!lastStatusByBike[pat] || tsMs > lastStatusByBike[pat].tsMs) {
+          lastStatusByBike[pat] = { tsMs, status };
+        }
+
+        // Última ocorrência de Recolhida/Vandalizada
+        if (status === 'recolhida' || status === 'vandalizada') {
+          if (!reportEntries[pat] || tsMs > reportEntries[pat].tsMs) {
+            reportEntries[pat] = { tsMs, status };
+          }
+        }
       });
 
-      // Statuses que indicam saída da mecânica (bike foi para estação ou descartada)
-      const EXIT_STATUSES = new Set([
-        'estação', 'estacao', 'não encontrada', 'nao encontrada',
-        'não atendida', 'nao atendida', 'recuperada', 'inicio_turno', 'fim_turno'
-      ]);
-
-      // Para bikes do Relatório (não da aba Mecânica): verifica se houve saída posterior
-      // Bikes da aba Mecânica nunca são removidas automaticamente — o mecânico decidiu inserir
-
-      // Verifica se o ÚLTIMO registro de cada bike é Recolhida ou Vandalizada
-      Object.entries(bikeHistory).forEach(([pat, history]) => {
-        // Se já está na aba Mecânica — não adiciona do Relatório
-        if (mechanicsSheetBikes.has(pat)) return;
-
-        history.sort((a, b) => a.tsMs - b.tsMs);
-        const last = history[history.length - 1];
-
-        // Último status deve ser Recolhida ou Vandalizada
-        if (last.status !== 'recolhida' && last.status !== 'vandalizada') return;
-
-        const info = bikeInfoMap[pat] || {};
-        bikeMap[pat] = {
-          row: -1, patrimonio: pat, status: 'Aguardando Confirmação',
-          dataEntrada: new Date(last.tsMs), mecanico: '', tratativa: '',
-          dataFinalizacao: '', carretinha: '',
-          bateria: info.bateria, carregamento: info.carregamento,
-          manual: false,
-          tsMs: last.tsMs
-        };
+      // Remove bikes cuja última ocorrência geral é uma saída posterior à última Recolhida
+      Object.keys(reportEntries).forEach(pat => {
+        const last = lastStatusByBike[pat];
+        if (last && EXIT_STATUSES.has(last.status) && last.tsMs > reportEntries[pat].tsMs) {
+          delete reportEntries[pat];
+        }
       });
     }
   } catch (e) {
     console.error('getMechanicsList - erro ao ler relatório:', e);
   }
 
-  // Remove campo interno tsMs antes de retornar
-  const results = Object.values(bikeMap).map(b => {
-    const { tsMs, ...rest } = b;
-    return rest;
+  // Passo 2: Aba Mecânica — apenas Em Manutenção e Reserva (não Aguardando)
+  const mechanicsStatus = {};
+  if (sheet) {
+    sheet.getDataRange().getValues().slice(1).forEach((row, idx) => {
+      const pat    = String(row[COLUMN_INDICES.MECHANICS.PATRIMONIO - 1] || '').trim().replace(/^0+/, '');
+      const status = (row[COLUMN_INDICES.MECHANICS.STATUS - 1] || '').toString().trim();
+      if (!pat) return;
+      if (status === 'Remanejada' || status === 'Aguardando Confirmação') return;
+      const tsMs = toMs(row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1]);
+      if (tsMs !== null && tsMs < CUTOFF_MS) return;
+      if (tsMs === null) return;
+      const tratativa = (row[COLUMN_INDICES.MECHANICS.TRATATIVA - 1] || '').toString().trim();
+      if (!mechanicsStatus[pat] || tsMs > (mechanicsStatus[pat].tsMs || 0)) {
+        mechanicsStatus[pat] = {
+          row: idx + 2, status, tsMs: tsMs || 0,
+          dataEntrada: row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1],
+          mecanico:    row[COLUMN_INDICES.MECHANICS.MECANICO - 1],
+          tratativa,
+          dataFinalizacao: row[COLUMN_INDICES.MECHANICS.DATA_FINALIZACAO - 1],
+          carretinha:      row[COLUMN_INDICES.MECHANICS.CARRETINHA - 1],
+          manual: tratativa.toUpperCase() === 'MANUAL'
+        };
+      }
+    });
+  }
+
+  // Passo 3: Monta resultado final
+  const bikeMap = {};
+
+  // 3a. Bikes do Relatório
+  Object.entries(reportEntries).forEach(([pat, entry]) => {
+    const mechData = mechanicsStatus[pat];
+    const info = bikeInfoMap[pat] || {};
+    if (mechData) {
+      // Já processada pelo mecânico — usa status da aba
+      bikeMap[pat] = {
+        row: mechData.row, patrimonio: pat, status: mechData.status,
+        dataEntrada: mechData.dataEntrada, mecanico: mechData.mecanico,
+        tratativa: mechData.tratativa, dataFinalizacao: mechData.dataFinalizacao,
+        carretinha: mechData.carretinha, bateria: info.bateria,
+        carregamento: info.carregamento, manual: mechData.manual
+      };
+    } else {
+      // Ainda não processada → Aguardando Confirmação
+      bikeMap[pat] = {
+        row: -1, patrimonio: pat, status: 'Aguardando Confirmação',
+        dataEntrada: new Date(entry.tsMs), mecanico: '', tratativa: '',
+        dataFinalizacao: '', carretinha: '',
+        bateria: info.bateria, carregamento: info.carregamento, manual: false
+      };
+    }
   });
 
-  return { success: true, data: results };
+  // 3b. Bikes da aba Mecânica não presentes no Relatório (inserção manual)
+  Object.entries(mechanicsStatus).forEach(([pat, mechData]) => {
+    if (bikeMap[pat]) return;
+    const info = bikeInfoMap[pat] || {};
+    bikeMap[pat] = {
+      row: mechData.row, patrimonio: pat, status: mechData.status,
+      dataEntrada: mechData.dataEntrada, mecanico: mechData.mecanico,
+      tratativa: mechData.tratativa, dataFinalizacao: mechData.dataFinalizacao,
+      carretinha: mechData.carretinha, bateria: info.bateria,
+      carregamento: info.carregamento, manual: true
+    };
+  });
+
+  return { success: true, data: Object.values(bikeMap) };
 }
 
 function insertBikeMechanics(bikeNumber, mechanicName, targetStatus) {
