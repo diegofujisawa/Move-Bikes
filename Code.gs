@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '81.4-mechanics-dedup';
+const BACKEND_VERSION = '81.5-mechanics-columns';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -2750,7 +2750,9 @@ function confirmMechanicsReceipt(bikeNumber, mechanicName) {
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][COLUMN_INDICES.MECHANICS.PATRIMONIO - 1]).trim().replace(/^0+/, '') === pStr
         && data[i][COLUMN_INDICES.MECHANICS.STATUS - 1] === 'Aguardando Confirmação') {
-      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.STATUS, 1, 2).setValues([['Em Manutenção', mechanicName]]);
+      const row = i + 1;
+      sheet.getRange(row, COLUMN_INDICES.MECHANICS.STATUS).setValue('Em Manutenção');
+      sheet.getRange(row, COLUMN_INDICES.MECHANICS.MECANICO).setValue(mechanicName);
       return { success: true };
     }
   }
@@ -2765,7 +2767,13 @@ function finalizeMechanicsRepair(bikeNumber, mechanicName, treatment) {
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][COLUMN_INDICES.MECHANICS.PATRIMONIO - 1]) === String(bikeNumber)
         && data[i][COLUMN_INDICES.MECHANICS.STATUS - 1] === 'Em Manutenção') {
-      sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.STATUS, 1, 4).setValues([['Reserva', mechanicName, treatment, new Date()]]);
+      const row = i + 1;
+      // Atualiza cada coluna individualmente para evitar escrita nas colunas erradas
+      // Colunas: STATUS(2), MECANICO(4), TRATATIVA(5), DATA_FINALIZACAO(6)
+      sheet.getRange(row, COLUMN_INDICES.MECHANICS.STATUS).setValue('Reserva');
+      sheet.getRange(row, COLUMN_INDICES.MECHANICS.MECANICO).setValue(mechanicName);
+      sheet.getRange(row, COLUMN_INDICES.MECHANICS.TRATATIVA).setValue(treatment);
+      sheet.getRange(row, COLUMN_INDICES.MECHANICS.DATA_FINALIZACAO).setValue(new Date());
       return { success: true };
     }
   }
