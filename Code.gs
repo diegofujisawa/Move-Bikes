@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '81.3-route-fix';
+const BACKEND_VERSION = '81.4-mechanics-dedup';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -2652,7 +2652,7 @@ function getMechanicsList() {
   // Chave: patrimônio normalizado → dados da bike
   const bikeMap = {};
 
-  // 1. Lê a aba Mecânica — apenas bikes com data >= corte OU sem data (processadas manualmente)
+  // 1. Lê a aba Mecânica — apenas bikes com data >= corte OU Em Manutenção/Reserva ativas
   if (sheet) {
     sheet.getDataRange().getValues().slice(1).forEach((row, idx) => {
       const pat    = String(row[COLUMN_INDICES.MECHANICS.PATRIMONIO - 1] || '').trim().replace(/^0+/, '');
@@ -2660,11 +2660,14 @@ function getMechanicsList() {
       if (!pat || status === 'Remanejada') return;
 
       const tsMs = toMs(row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1]);
-
-      // Filtra pela data de corte — ignora entradas antigas (antes de 20/03/2026)
-      // Exceto se estiver Em Manutenção ou Reserva (processamento em andamento)
       const isActiveStatus = status === 'Em Manutenção' || status === 'Reserva';
-      if (tsMs && tsMs < CUTOFF_MS && !isActiveStatus) return;
+
+      // Regra de corte:
+      // - Se tem data válida e é antes de 20/03/2026 → só mostra se for status ativo (Em Manutenção/Reserva)
+      // - Se não tem data válida (tsMs=null) → só mostra se for status ativo
+      // - Se tem data >= corte → sempre mostra
+      if (tsMs !== null && tsMs < CUTOFF_MS && !isActiveStatus) return;
+      if (tsMs === null && !isActiveStatus) return;
 
       const info = bikeInfoMap[pat] || {};
       const entry = {
@@ -2712,14 +2715,9 @@ function getMechanicsList() {
         const last = history[history.length - 1];
         if (last.status !== 'recolhida' && last.status !== 'vandalizada') return;
 
-        // Só adiciona se não está já no bikeMap com status ativo
-        if (bikeMap[pat]) {
-          const existing = bikeMap[pat];
-          // Se já está Em Manutenção ou Reserva — não sobrescreve
-          if (existing.status === 'Em Manutenção' || existing.status === 'Reserva') return;
-          // Se a entrada da aba Mecânica é mais recente — não sobrescreve
-          if (existing.tsMs >= last.tsMs) return;
-        }
+        // Se já está na aba Mecânica com qualquer status — não adiciona do Relatório
+        // A aba Mecânica é a fonte de verdade para o fluxo da bike
+        if (bikeMap[pat]) return;
 
         const info = bikeInfoMap[pat] || {};
         bikeMap[pat] = {
