@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '80.0-refactored';
+const BACKEND_VERSION = '81.1-mechanics-fix';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -2496,6 +2496,7 @@ function getMechanicsList() {
     } catch (e) {}
   }
 
+  // Mapa de bateria/carregamento das bikes
   const bikeIndex = getBikeIndex();
   const bikeInfoMap = {};
   Object.entries(bikeIndex).forEach(([pat, row]) => {
@@ -2505,43 +2506,106 @@ function getMechanicsList() {
     bikeInfoMap[pat] = { bateria, carregamento: row[COLUMN_INDICES.BIKES.CARREGAMENTO - 1] };
   });
 
+  // 1. Lê o que já está na aba Mecânica (processado manualmente pelo mecânico)
   const results = [];
   const existingBikes = new Set();
+  const lastHandledTimestamp = {};
+
   if (sheet) {
     sheet.getDataRange().getValues().slice(1).forEach((row, idx) => {
       const pat    = String(row[COLUMN_INDICES.MECHANICS.PATRIMONIO - 1]).trim().replace(/^0+/, '');
-      const status = row[COLUMN_INDICES.MECHANICS.STATUS - 1];
-      if (status !== 'Remanejada') {
-        const info = bikeInfoMap[pat] || {};
-        results.push({
-          row: idx + 2, patrimonio: pat, status,
-          dataEntrada:      row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1],
-          mecanico:         row[COLUMN_INDICES.MECHANICS.MECANICO - 1],
-          tratativa:        row[COLUMN_INDICES.MECHANICS.TRATATIVA - 1],
-          dataFinalizacao:  row[COLUMN_INDICES.MECHANICS.DATA_FINALIZACAO - 1],
-          carretinha:       row[COLUMN_INDICES.MECHANICS.CARRETINHA - 1],
-          bateria:          info.bateria, carregamento: info.carregamento
-        });
-        existingBikes.add(pat);
+      const status = (row[COLUMN_INDICES.MECHANICS.STATUS - 1] || '').toString().trim();
+      if (!pat || status === 'Remanejada') return;
+
+      const info = bikeInfoMap[pat] || {};
+      results.push({
+        row: idx + 2, patrimonio: pat, status,
+        dataEntrada:     row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1],
+        mecanico:        row[COLUMN_INDICES.MECHANICS.MECANICO - 1],
+        tratativa:       row[COLUMN_INDICES.MECHANICS.TRATATIVA - 1],
+        dataFinalizacao: row[COLUMN_INDICES.MECHANICS.DATA_FINALIZACAO - 1],
+        carretinha:      row[COLUMN_INDICES.MECHANICS.CARRETINHA - 1],
+        bateria: info.bateria, carregamento: info.carregamento
+      });
+      existingBikes.add(pat);
+
+      const ts = row[COLUMN_INDICES.MECHANICS.DATA_ENTRADA - 1];
+      if (ts instanceof Date && (!lastHandledTimestamp[pat] || ts > lastHandledTimestamp[pat])) {
+        lastHandledTimestamp[pat] = ts;
       }
     });
   }
 
+  // 2. Busca bikes recentes do Relatório com status Recolhida ou Vandalizada APENAS.
+  //    REGRA: Estação = remanejamento (NÃO vai para a mecânica).
+  //           Recolhida = bike veio para a filial (VAI para a mecânica).
+  //           Vandalizada = bike com dano (VAI para a mecânica).
+  //    DATA DE CORTE: apenas registros a partir de 20/03/2026.
+  //    Usa timestamp numérico para evitar problemas de timezone.
+  const MECHANICS_CUTOFF_MS = new Date('2026-03-20T00:00:00').getTime();
+
   try {
-    const changeStatus = getChangeStatusData('week');
-    if (changeStatus.success && changeStatus.data) {
-      [...(changeStatus.data.vandalizadas || []), ...(changeStatus.data.filial || [])].forEach(item => {
-        const pStr = String(item.patrimonio).trim().replace(/^0+/, '');
-        if (pStr && !existingBikes.has(pStr)) {
-          const info = bikeInfoMap[pStr] || {};
-          results.push({ row: -1, patrimonio: pStr, status: 'Aguardando Confirmação',
-            dataEntrada: new Date(), mecanico: '', tratativa: item.observation || '',
-            dataFinalizacao: '', carretinha: '', bateria: info.bateria, carregamento: info.carregamento });
-          existingBikes.add(pStr);
+    const reportSheet = ss.getSheetByName(REPORT_SHEET_NAME);
+    if (reportSheet && reportSheet.getLastRow() > 1) {
+      const lastRow = reportSheet.getLastRow();
+      const rowsToRead = Math.min(lastRow - 1, 5000);
+      const reportData = reportSheet.getRange(lastRow - rowsToRead + 1, 1, rowsToRead, 5).getValues();
+
+      // Monta histórico completo por bike com timestamp real
+      // Só considera registros a partir de 20/03/2026
+      const bikeHistory = {}; // pat -> [{tsMs, status}]
+
+      reportData.forEach(row => {
+        const raw = row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1];
+        if (!raw) return;
+
+        // Converte para ms — suporta Date nativo (Apps Script) e string BR
+        let tsMs;
+        if (raw instanceof Date) {
+          tsMs = raw.getTime();
+        } else {
+          const parsed = parseTimestamp(raw);
+          if (!parsed) return;
+          tsMs = parsed.getTime();
         }
+
+        if (tsMs < MECHANICS_CUTOFF_MS) return; // ignora antes de 20/03/2026
+
+        const pat = String(row[COLUMN_INDICES.REPORTS.PATRIMONIO - 1] || '').trim().replace(/^0+/, '');
+        if (!pat) return;
+        const status = (row[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim().toLowerCase();
+        if (!status) return;
+
+        if (!bikeHistory[pat]) bikeHistory[pat] = [];
+        bikeHistory[pat].push({ tsMs, status });
+      });
+
+      // Para cada bike, ordena por timestamp e verifica se o ÚLTIMO registro
+      // é Recolhida ou Vandalizada — se sim, aparece na mecânica
+      Object.entries(bikeHistory).forEach(([pat, history]) => {
+        history.sort((a, b) => a.tsMs - b.tsMs);
+        const last = history[history.length - 1];
+        const isEntry = last.status === 'recolhida' || last.status === 'vandalizada';
+        if (!isEntry) return;
+
+        if (existingBikes.has(pat)) {
+          const lastHandled = lastHandledTimestamp[pat];
+          if (lastHandled && last.tsMs <= lastHandled.getTime()) return;
+        }
+
+        const info = bikeInfoMap[pat] || {};
+        results.push({
+          row: -1, patrimonio: pat, status: 'Aguardando Confirmação',
+          dataEntrada: new Date(last.tsMs), mecanico: '', tratativa: '',
+          dataFinalizacao: '', carretinha: '',
+          bateria: info.bateria, carregamento: info.carregamento
+        });
+        existingBikes.add(pat);
       });
     }
-  } catch (e) {}
+  } catch (e) {
+    console.error('getMechanicsList - erro ao ler relatório:', e);
+  }
 
   return { success: true, data: results };
 }
@@ -2605,6 +2669,37 @@ function finalizeTrailer(trailerName) {
     }
   }
   return { success: true, message: `${count} bikes finalizadas da carretinha ${trailerName}.` };
+}
+
+// =================================================================
+// --- FUNÇÃO DE TESTE (executar manualmente no Apps Script para diagnóstico) ---
+// =================================================================
+function testMechanics() {
+  const result = getMechanicsList();
+  Logger.log('=== RESULTADO MECANICA ===');
+  Logger.log('Total: ' + result.data.length);
+  Logger.log('Aguardando: ' + result.data.filter(b => b.status === 'Aguardando Confirmação').length);
+  Logger.log('Em Manutenção: ' + result.data.filter(b => b.status === 'Em Manutenção').length);
+  Logger.log('Reserva: ' + result.data.filter(b => b.status === 'Reserva').length);
+  Logger.log('--- Bikes Aguardando Confirmação ---');
+  result.data.filter(b => b.status === 'Aguardando Confirmação').forEach(b => {
+    Logger.log('Bike: ' + b.patrimonio + ' | Data: ' + b.dataEntrada);
+  });
+}
+
+function testTimestamp() {
+  // Testa se parseTimestamp funciona corretamente com datas do Sheets
+  const sheet = getSpreadsheet().getSheetByName('Relatorio');
+  if (!sheet) { Logger.log('Aba Relatorio não encontrada'); return; }
+  const lastRow = sheet.getLastRow();
+  const sample = sheet.getRange(lastRow - 10, 1, 10, 3).getValues();
+  const CUTOFF_MS = new Date('2026-03-20T00:00:00').getTime();
+  sample.forEach((row, i) => {
+    const raw = row[0];
+    const ts = raw instanceof Date ? raw : parseTimestamp(raw);
+    const tsMs = ts ? ts.getTime() : null;
+    Logger.log(`Row ${lastRow - 10 + i}: raw=${raw} | type=${typeof raw} | isDate=${raw instanceof Date} | tsMs=${tsMs} | afterCutoff=${tsMs ? tsMs >= CUTOFF_MS : 'null'} | status=${row[2]}`);
+  });
 }
 
 // =================================================================

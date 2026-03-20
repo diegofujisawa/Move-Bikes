@@ -6,6 +6,11 @@ import {
   UserIcon, AlertTriangleIcon, QrCodeIcon, TrailerIcon, SwitchIcon,
   RefreshIcon, DatabaseIcon, CheckCircleIcon
 } from './icons';
+import { 
+  Settings, Battery, Lock, Map as MapIconLucide, 
+  WifiOff, AlertCircle, RefreshCw, ChevronUp, ChevronDown, ChevronLeft, 
+  ChevronRight, Circle, Play, Locate, Map
+} from 'lucide-react';
 import { Html5Qrcode } from 'html5-qrcode';
 import { auth, db } from '../firebase';
 import { waitForAuth } from '../firebase';
@@ -63,6 +68,20 @@ interface MainScreenProps {
   onShowMap: () => void;
   onUpdateUser: (updates: Partial<User>) => void;
 }
+
+const ZoneButton = ({ id, icon, label, config, setConfig }: { id: string, icon: React.ReactNode, label: string, config: any, setConfig: any }) => (
+  <button
+    onClick={() => setConfig((prev: any) => ({ ...prev, selectedZone: id }))}
+    className={`flex flex-col items-center justify-center h-8 w-8 rounded-md border transition-all ${
+      config.selectedZone === id 
+        ? 'bg-blue-600 text-white border-blue-600 shadow-sm' 
+        : 'bg-gray-50 text-gray-400 border-gray-100 hover:bg-gray-100'
+    }`}
+  >
+    <div className="scale-90">{icon}</div>
+    <span className="text-[7px] font-bold leading-none mt-0.5">{label}</span>
+  </button>
+);
 
 // =================================================================
 // HELPERS
@@ -153,6 +172,28 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const [statusTimeRange, setStatusTimeRange] = useState<'24h' | '48h' | '72h' | 'week'>('24h');
   const [alertCount, setAlertCount] = useState(0);
   const [hasNewAlerts, setHasNewAlerts] = useState(false);
+
+  // --- Route Generation ---
+  const [isRouteConfigOpen, setIsRouteConfigOpen] = useState(false);
+  const [routeConfig, setRouteConfig] = useState({
+    locationSource: 'gps' as 'gps' | 'zone',
+    selectedZone: 'central' as 'norte' | 'leste' | 'sul' | 'oeste' | 'central',
+    filters: {
+      lowBattery: true,
+      openLock: true,
+      outOfStation: true,
+      offline: false,
+      wrongStatus: true
+    }
+  });
+
+  const ZONES = useMemo(() => ({
+    norte:   { lat: -23.4462, lng: -46.6333, label: 'ZONA NORTE' },
+    leste:   { lat: -23.5433, lng: -46.5333, label: 'ZONA LESTE' },
+    sul:     { lat: -23.6433, lng: -46.6333, label: 'ZONA SUL' },
+    oeste:   { lat: -23.5433, lng: -46.7333, label: 'ZONA OESTE' },
+    central: { lat: -23.5433, lng: -46.6333, label: 'ZONA CENTRAL' }
+  }), []);
   const [lastViewedAlertCount, setLastViewedAlertCount] = useState(0);
   const [editingDriver, setEditingDriver] = useState<any>(null);
 
@@ -170,7 +211,9 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [searchedBike, setSearchedBike] = useState<BicycleData | null>(null);
   const [isSearching, setIsSearching] = useState(false);
-  const [useDriversSummaryFallback, setUseDriversSummaryFallback] = useState(false);
+  const [activeMechanicCategory, setActiveMechanicCategory] = useState<string | null>(null);
+  const [clickedBikesForStatus, setClickedBikesForStatus] = useState<Set<string>>(new Set());
+  const [formattedBikesForCopy, setFormattedBikesForCopy] = useState<string>('');
 
   // --- Refs ---
   const scannerRef = useRef<Html5Qrcode | null>(null);
@@ -220,7 +263,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const syncRequestsToFirebase = useCallback(async (sheetsRequests: any[]) => {
     try {
       const snapshot = await getDocs(collection(db, 'requests'));
-      const firestoreIds = new Set(snapshot.docs.map(d => d.id));
 
       // IDs que ainda existem no Sheets como pendentes (apenas Firestore IDs)
       const activeSheetsIds = new Set(
@@ -351,7 +393,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
 
   const showNotification = (title: string, body: string) => {
     if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
-      try { new Notification(title, { body, icon: '/favicon.ico' }); } catch (e) {}
+      try { new Notification(title, { body, icon: '/favicon.ico' }); } catch { }
     }
   };
 
@@ -1003,6 +1045,35 @@ const MainScreen: React.FC<MainScreenProps> = ({
     setIsMechanicSelectionModalOpen(true);
   };
 
+  const handleAlterarStatus = (bikeId: string) => {
+    setClickedBikesForStatus(prev => {
+      const next = new Set(prev);
+      next.add(bikeId);
+      return next;
+    });
+    setFormattedBikesForCopy(prev => {
+      const bikes = prev ? prev.split(',').map(b => b.trim()) : [];
+      if (!bikes.includes(bikeId)) {
+        bikes.push(bikeId);
+      }
+      return bikes.join(',');
+    });
+  };
+
+  const handleNotFoundMechanic = async (bikeId: string) => {
+    if (!window.confirm(`Confirmar que a bicicleta ${bikeId} não foi encontrada?`)) return;
+    setIsLoading(true);
+    try {
+      await apiCall({ action: 'declineMechanicsReceipt', bikeNumber: bikeId, mechanicName: driverName }, 1, true);
+      alert('Bicicleta marcada como não encontrada.');
+      refreshAll(true);
+    } catch (err: any) {
+      alert('Erro ao processar: ' + err.message);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleMechanicSelectionConfirm = async (mechanicName: string) => {
     setIsLoading(true);
     try {
@@ -1054,6 +1125,52 @@ const MainScreen: React.FC<MainScreenProps> = ({
       refreshAll(true);
     } catch (err: any) { alert('Erro: ' + err.message); }
     finally { setIsLoading(false); }
+  };
+
+  const handleInsertBike = async (bikeNumber: string, targetStatus: string) => {
+    if (processingBikesRef.current.has(bikeNumber)) return;
+    processingBikesRef.current.add(bikeNumber);
+    setProcessingBikes(new Set(processingBikesRef.current));
+    setIsLoading(true);
+
+    try {
+      await waitForAuth();
+      // Atualiza Firestore
+      await setDoc(doc(db, 'bikes', bikeNumber), {
+        status: targetStatus,
+        responsavel: driverName,
+        ultimaAtualizacao: serverTimestamp()
+      }, { merge: true });
+
+      // Log no Firestore
+      await addDoc(collection(db, 'reports'), {
+        driverName,
+        bikeNumber,
+        status: targetStatus,
+        timestamp: serverTimestamp(),
+        observation: `Inserida em ${targetStatus} via consulta`
+      });
+
+      // Atualiza Sheets
+      await apiCall({
+        action: 'insertBikeMechanics',
+        driverName,
+        bikeNumber,
+        targetStatus
+      }, 1, true);
+
+      setSuccessMessage(`Bicicleta ${bikeNumber} inserida em ${targetStatus}!`);
+      setSearchedBike(null);
+      setSearchTerm('');
+      refreshAll(true);
+    } catch (err: any) {
+      console.error('Erro ao inserir bike:', err);
+      setError('Erro ao inserir bike: ' + err.message);
+    } finally {
+      setIsLoading(false);
+      processingBikesRef.current.delete(bikeNumber);
+      setProcessingBikes(new Set(processingBikesRef.current));
+    }
   };
 
   const handleUpdateDriverState = async (targetDriver: string, route: string[], collected: string[]) => {
@@ -1198,7 +1315,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const runDriversSummaryFallback = async () => {
     const range = summaryTimeRange;
     try {
-      let drivers: string[] = category.includes('ADM')
+      const drivers: string[] = category.includes('ADM')
         ? ((await apiCall({ action: 'getMotoristas' })).data || [])
         : [driverName];
       const reqResult = await apiCall({ action: 'getRequests', driverName, category }, 1, true);
@@ -1424,6 +1541,61 @@ const MainScreen: React.FC<MainScreenProps> = ({
     );
   }
 
+  const handleGenerateRoute = async () => {
+    setIsLoading(true);
+    try {
+      let location = { lat: 0, lng: 0 };
+      if (routeConfig.locationSource === 'gps') {
+        if (!currentDriverLocation) {
+          setError('Localização GPS não disponível. Verifique se o GPS está ativado.');
+          setIsLoading(false);
+          return;
+        }
+        location = { lat: currentDriverLocation.lat, lng: currentDriverLocation.lng };
+      } else {
+        location = ZONES[routeConfig.selectedZone];
+      }
+
+      const response = await apiCall({
+        action: 'generateDriverRoute',
+        driverName,
+        location,
+        filters: routeConfig.filters,
+        maxBikes: 20,
+        rangeKm: 3
+      });
+
+      if (response.success) {
+        // Adicionar solicitação única no Firestore para notificação imediata
+        const bikes = response.data || [];
+        if (bikes.length > 0) {
+          const bikeNumbers = bikes.map((b: any) => b.patrimonio).join(', ');
+          await addDoc(collection(db, 'requests'), {
+            bikeNumber: bikeNumbers,
+            location: 'Criado via Roteiro Automático',
+            reason: 'ROTEIRO GERADO',
+            recipient: driverName,
+            status: 'Pendente',
+            timestamp: serverTimestamp(),
+            driverName,
+            latitude: location.lat,
+            longitude: location.lng
+          });
+        }
+        
+        setSuccessMessage(response.message || 'Roteiro gerado com sucesso!');
+        setIsRouteConfigOpen(false);
+        if (refreshAllRef.current) refreshAllRef.current();
+      } else {
+        setError('Erro ao gerar roteiro: ' + response.error);
+      }
+    } catch {
+      setError('Erro de conexão ao gerar roteiro.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // =================================================================
   // RENDER
   // =================================================================
@@ -1439,6 +1611,39 @@ const MainScreen: React.FC<MainScreenProps> = ({
                                                  <RefreshIcon className="w-5 h-5 animate-spin" />}
           <p className="text-sm font-medium">{migrationMessage.text}</p>
           <button onClick={() => setMigrationMessage(null)} className="ml-2 opacity-50 hover:opacity-100"><XIcon className="w-4 h-4" /></button>
+        </div>
+      )}
+
+      {/* CAMPO DE CÓPIA PARA MECÂNICO */}
+      {isMecanica && formattedBikesForCopy && (
+        <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg shadow-sm animate-fade-in-down">
+          <p className="text-[10px] font-bold text-blue-700 uppercase mb-1">Bikes para Alterar Status (Copiar):</p>
+          <div className="flex gap-2">
+            <input 
+              readOnly 
+              value={formattedBikesForCopy} 
+              className="flex-1 text-xs font-mono p-2 border rounded bg-white"
+              onClick={(e) => (e.target as HTMLInputElement).select()}
+            />
+            <button 
+              onClick={() => {
+                navigator.clipboard.writeText(formattedBikesForCopy);
+                alert('Copiado para a área de transferência!');
+              }}
+              className="px-3 py-1 bg-blue-600 text-white text-[10px] font-bold rounded hover:bg-blue-700"
+            >
+              Copiar
+            </button>
+            <button 
+              onClick={() => {
+                setFormattedBikesForCopy('');
+                setClickedBikesForStatus(new Set());
+              }}
+              className="px-3 py-1 bg-gray-200 text-gray-600 text-[10px] font-bold rounded hover:bg-gray-300"
+            >
+              Limpar
+            </button>
+          </div>
         </div>
       )}
 
@@ -1493,24 +1698,24 @@ const MainScreen: React.FC<MainScreenProps> = ({
             <div className="flex justify-between items-center mb-2">
               <h2 className="text-sm font-bold text-gray-700 uppercase flex items-center gap-2"><SheetIcon className="w-4 h-4 text-blue-600"/>Resumo</h2>
               <div className="flex bg-white border rounded-md p-0.5 shadow-sm">
-                {(['-1','-7','day','week','month'] as const).map(r => (
-                  <button key={r} onClick={() => setSummaryTimeRange(r)}
+                {(['-1','-7','day','week','month'] as const).map((r, i) => (
+                  <button key={`period-driver-${r}-${i}`} onClick={() => setSummaryTimeRange(r)}
                     className={`px-2 py-0.5 text-[9px] font-bold uppercase rounded ${summaryTimeRange === r ? 'bg-blue-600 text-white' : 'text-gray-500 hover:bg-gray-100'}`}>
                     {r === '-1' ? '-1' : r === '-7' ? '-7' : r === 'day' ? 'Dia' : r === 'week' ? 'Semana' : 'Mês'}
                   </button>
                 ))}
               </div>
             </div>
-            {driversSummary.filter(d => d.name.toLowerCase() === driverName.toLowerCase()).map(driver => (
-              <div key={driver.name} className="grid grid-cols-5 gap-1.5">
+            {driversSummary.filter(d => d.name.toLowerCase() === driverName.toLowerCase()).map((driver, i) => (
+              <div key={`driver-resume-${driver.name}-${i}`} className="grid grid-cols-5 gap-1.5">
                 {[
                   { label: 'Notif.', value: driver.pendingRequests, c: 'blue' },
                   { label: 'Recolh.', value: driver.stats.recolhidas, c: 'green' },
                   { label: 'Remanej.', value: driver.stats.remanejada, c: 'indigo' },
                   { label: 'Não Enc.', value: driver.stats.naoEncontrada, c: 'red' },
                   { label: 'Não Atend.', value: driver.stats.naoAtendida || 0, c: 'orange' },
-                ].map(item => (
-                  <div key={item.label} className={`bg-${item.c}-50 p-1.5 rounded border border-${item.c}-100 text-center`}>
+                ].map((item, i) => (
+                  <div key={`stat-${item.label}-${i}`} className={`bg-${item.c}-50 p-1.5 rounded border border-${item.c}-100 text-center`}>
                     <p className={`text-[8px] text-${item.c}-600 font-black uppercase leading-tight`}>{item.label}</p>
                     <p className={`text-sm font-black text-${item.c}-800`}>{item.value}</p>
                   </div>
@@ -1579,8 +1784,8 @@ const MainScreen: React.FC<MainScreenProps> = ({
                 { label: 'Trava', value: searchedBike['Trava'] },
                 { label: 'Usuário', value: searchedBike['Usuário'] },
                 { label: 'Carregamento', value: searchedBike['Carregamento'] },
-              ].map(item => (
-                <div key={item.label}>
+              ].map((item, i) => (
+                <div key={`bike-info-${item.label}-${i}`}>
                   <p className="font-semibold text-gray-500 text-xs uppercase">{item.label}</p>
                   <p className="text-gray-800 font-medium">{item.value}</p>
                 </div>
@@ -1600,10 +1805,25 @@ const MainScreen: React.FC<MainScreenProps> = ({
               </div>
             </div>
             <div className="mt-4 pt-4 border-t border-green-200 grid grid-cols-2 gap-2">
-              <button onClick={() => handleStatusUpdate('Recolhida')} disabled={isLoading || processingBikes.has(String(searchedBike['Patrimônio']))}
-                className="px-3 py-1.5 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm disabled:bg-gray-400">Recolhida</button>
-              <button onClick={() => handleStatusUpdate('Não encontrada')} disabled={isLoading || processingBikes.has(String(searchedBike['Patrimônio']))}
-                className="px-3 py-1.5 bg-red-600 text-white rounded-md hover:bg-red-700 text-sm disabled:bg-gray-400">Não Encontrada</button>
+              {!isMecanica && (
+                <>
+                  <button onClick={() => handleStatusUpdate('Recolhida')} disabled={isLoading || processingBikes.has(String(searchedBike['Patrimônio']))}
+                    className="px-3 py-1.5 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm disabled:bg-gray-400">Recolhida</button>
+                  <button onClick={() => handleStatusUpdate('Não encontrada')} disabled={isLoading || processingBikes.has(String(searchedBike['Patrimônio']))}
+                    className="px-3 py-1.5 bg-red-600 text-white rounded-md hover:bg-red-700 text-sm disabled:bg-gray-400">Não Encontrada</button>
+                </>
+              )}
+              
+              {isMecanica && (
+                <>
+                  <button onClick={() => handleInsertBike(String(searchedBike['Patrimônio']), 'Aguardando Confirmação')} disabled={isLoading || processingBikes.has(String(searchedBike['Patrimônio']))}
+                    className="px-3 py-1.5 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-[10px] font-bold disabled:bg-gray-400">Inserir Filial</button>
+                  <button onClick={() => handleInsertBike(String(searchedBike['Patrimônio']), 'Em Manutenção')} disabled={isLoading || processingBikes.has(String(searchedBike['Patrimônio']))}
+                    className="px-3 py-1.5 bg-orange-600 text-white rounded-md hover:bg-orange-700 text-[10px] font-bold disabled:bg-gray-400">Inserir Mecânica</button>
+                  <button onClick={() => handleInsertBike(String(searchedBike['Patrimônio']), 'Reserva')} disabled={isLoading || processingBikes.has(String(searchedBike['Patrimônio']))}
+                    className="col-span-2 px-3 py-1.5 bg-green-600 text-white rounded-md hover:bg-green-700 text-[10px] font-bold disabled:bg-gray-400">Inserir Reserva</button>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -1628,8 +1848,8 @@ const MainScreen: React.FC<MainScreenProps> = ({
             });
             return visibleRequests.length > 0 ? (
               <ul className="space-y-3">
-                {visibleRequests.map(req => (
-                <li key={req.id} className="p-3 bg-white border rounded-md shadow-sm flex justify-between items-start gap-3">
+                {visibleRequests.map((req, i) => (
+                <li key={`req-${req.id}-${i}`} className="p-3 bg-white border rounded-md shadow-sm flex justify-between items-start gap-3">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
                       <p className="font-bold text-blue-600">Bicicleta: {req.bikeNumber}</p>
@@ -1649,73 +1869,151 @@ const MainScreen: React.FC<MainScreenProps> = ({
           })()}
         </div>
 
-        {/* MECÂNICA */}
+        {/* ÍCONES DE ATALHO MECÂNICA */}
         {isMecanica && (
+          <div className="grid grid-cols-3 gap-3 mb-6">
+            <button 
+              onClick={() => setActiveMechanicCategory(activeMechanicCategory === 'Filial' ? null : 'Filial')}
+              className={`flex flex-col items-center justify-center p-3 border rounded-xl shadow-sm transition-all active:scale-95 ${activeMechanicCategory === 'Filial' ? 'bg-blue-600 border-blue-700 text-white' : 'bg-blue-50 border-blue-100 hover:bg-blue-100'}`}
+            >
+              <div className={`p-2 rounded-full mb-2 ${activeMechanicCategory === 'Filial' ? 'bg-white text-blue-600' : 'bg-blue-600 text-white'}`}>
+                <CarIcon className="w-5 h-5" />
+              </div>
+              <span className={`text-[9px] font-bold text-center leading-tight h-6 flex items-center ${activeMechanicCategory === 'Filial' ? 'text-white' : 'text-blue-800'}`}>Filial, aguardando confirmação</span>
+              <span className={`mt-1 text-xs font-black ${activeMechanicCategory === 'Filial' ? 'text-white' : 'text-blue-600'}`}>
+                {mechanicsList.filter(b => b.status === 'Aguardando Confirmação').length}
+              </span>
+            </button>
+            <button 
+              onClick={() => setActiveMechanicCategory(activeMechanicCategory === 'Manutenção' ? null : 'Manutenção')}
+              className={`flex flex-col items-center justify-center p-3 border rounded-xl shadow-sm transition-all active:scale-95 ${activeMechanicCategory === 'Manutenção' ? 'bg-orange-600 border-orange-700 text-white' : 'bg-orange-50 border-orange-100 hover:bg-orange-100'}`}
+            >
+              <div className={`p-2 rounded-full mb-2 ${activeMechanicCategory === 'Manutenção' ? 'bg-white text-orange-600' : 'bg-orange-600 text-white'}`}>
+                <BicycleIcon className="w-5 h-5" />
+              </div>
+              <span className={`text-[9px] font-bold text-center leading-tight h-6 flex items-center ${activeMechanicCategory === 'Manutenção' ? 'text-white' : 'text-orange-800'}`}>Em manutenção</span>
+              <span className={`mt-1 text-xs font-black ${activeMechanicCategory === 'Manutenção' ? 'text-white' : 'text-orange-600'}`}>
+                {mechanicsList.filter(b => b.status === 'Em Manutenção').length}
+              </span>
+            </button>
+            <button 
+              onClick={() => setActiveMechanicCategory(activeMechanicCategory === 'Reserva' ? null : 'Reserva')}
+              className={`flex flex-col items-center justify-center p-3 border rounded-xl shadow-sm transition-all active:scale-95 ${activeMechanicCategory === 'Reserva' ? 'bg-green-600 border-green-700 text-white' : 'bg-green-50 border-green-100 hover:bg-green-100'}`}
+            >
+              <div className={`p-2 rounded-full mb-2 ${activeMechanicCategory === 'Reserva' ? 'bg-white text-green-600' : 'bg-green-600 text-white'}`}>
+                <TrailerIcon className="w-5 h-5" />
+              </div>
+              <span className={`text-[9px] font-bold text-center leading-tight h-6 flex items-center ${activeMechanicCategory === 'Reserva' ? 'text-white' : 'text-green-800'}`}>Reserva</span>
+              <span className={`mt-1 text-xs font-black ${activeMechanicCategory === 'Reserva' ? 'text-white' : 'text-green-600'}`}>
+                {mechanicsList.filter(b => b.status === 'Reserva').length}
+              </span>
+            </button>
+          </div>
+        )}
+
+        {/* MECÂNICA */}
+        {isMecanica && activeMechanicCategory && (
           <div className="mt-6 space-y-6">
-            {[
-              { status: 'Aguardando Confirmação', title: 'Filial - Aguardando Confirmação', bg: 'blue', Icon: CarIcon,
-                action: (bike: any) => <button onClick={() => handleConfirmMechanicsReceipt(bike.patrimonio)} className="px-3 py-1 bg-blue-600 text-white text-xs font-bold rounded hover:bg-blue-700 active:scale-95">Confirmar Recebimento</button> },
-              { status: 'Em Manutenção', title: 'Mecânica - Em Manutenção', bg: 'orange', Icon: BicycleIcon,
-                action: (bike: any) => <button onClick={() => { setSelectedMechanicBike(bike); setIsMechanicRepairModalOpen(true); }} className="px-3 py-1 bg-orange-600 text-white text-xs font-bold rounded hover:bg-orange-700 active:scale-95">Finalizar Reparo</button> },
-            ].map(({ status, title, bg, Icon, action }) => (
-              <div key={status} className={`p-4 border rounded-lg bg-${bg}-50 shadow-sm`}>
-                <h2 className={`text-lg font-bold text-${bg}-800 mb-3 flex items-center gap-2`}><Icon className="w-5 h-5"/>{title}</h2>
-                {mechanicsList.filter(b => b.status === status).length > 0 ? (
+            {activeMechanicCategory === 'Filial' && (
+              <div id="section-filial" className="p-4 border rounded-lg bg-blue-50 shadow-sm scroll-mt-4">
+                <h2 className="text-lg font-bold text-blue-800 mb-3 flex items-center gap-2"><CarIcon className="w-5 h-5"/>Filial - Aguardando Confirmação</h2>
+                {mechanicsList.filter(b => b.status === 'Aguardando Confirmação').length > 0 ? (
                   <div className="space-y-2">
-                    {mechanicsList.filter(b => b.status === status).map(bike => (
-                      <div key={bike.patrimonio} className="flex justify-between items-center p-3 bg-white border rounded-md shadow-sm">
+                    {mechanicsList.filter(b => b.status === 'Aguardando Confirmação').map((bike, i) => (
+                      <div key={`mec-filial-${bike.patrimonio}-${i}`} className="flex justify-between items-center p-3 bg-white border rounded-md shadow-sm">
                         <div>
                           <span className="font-bold text-gray-700">Bike: {bike.patrimonio}</span>
-                          {bike.bateria !== undefined && <p className="text-[10px] text-gray-600">Bateria: {bike.bateria}%</p>}
+                          <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+                            {bike.bateria !== undefined && <p className="text-[10px] text-gray-600">Bateria: {bike.bateria}%</p>}
+                            {bike.carregamento && <p className="text-[10px] text-green-600 font-bold">⚡ Carregando</p>}
+                          </div>
                           {bike.mecanico && <p className="text-[10px] font-bold text-blue-600">Mecânico: {bike.mecanico}</p>}
                           {bike.tratativa && <p className="text-[10px] text-gray-500 italic">Obs: {bike.tratativa}</p>}
                         </div>
-                        {action(bike)}
+                        <div className="flex flex-col gap-2 min-w-[140px]">
+                          {!clickedBikesForStatus.has(bike.patrimonio) && (
+                            <button onClick={() => handleAlterarStatus(bike.patrimonio)} className="w-full px-3 py-1.5 bg-blue-600 text-white text-xs font-bold rounded hover:bg-blue-700 active:scale-95">Status</button>
+                          )}
+                          <div className="flex gap-2">
+                            <button onClick={() => handleConfirmMechanicsReceipt(bike.patrimonio)} className="flex-1 px-3 py-1.5 bg-orange-500 text-white text-xs font-bold rounded hover:bg-orange-600 active:scale-95">Manutenção</button>
+                            <button onClick={() => handleNotFoundMechanic(bike.patrimonio)} className="flex-1 px-3 py-1.5 bg-red-500 text-white text-xs font-bold rounded hover:bg-red-600 active:scale-95">Não encontrada</button>
+                          </div>
+                        </div>
                       </div>
                     ))}
                   </div>
                 ) : <p className="text-sm text-gray-500 italic">Nenhuma bike.</p>}
               </div>
-            ))}
+            )}
 
-            <div className="p-4 border rounded-lg bg-green-50 shadow-sm">
-              <h2 className="text-lg font-bold text-green-800 mb-3 flex items-center gap-2"><TrailerIcon className="w-5 h-5"/>Reserva - Prontas para Remanejamento</h2>
-              {mechanicsList.filter(b => b.status === 'Reserva').length > 0 ? (
-                <div className="space-y-4">
-                  {Object.entries(
-                    mechanicsList.filter(b => b.status === 'Reserva').reduce((acc, bike) => {
-                      const key = bike.carretinha || 'Sem Carretinha';
-                      if (!acc[key]) acc[key] = [];
-                      acc[key].push(bike);
-                      return acc;
-                    }, {} as Record<string, any[]>)
-                  ).map(([trailer, bikes]) => (
-                    <div key={trailer} className="border border-green-200 rounded-md bg-white p-3 shadow-sm">
-                      <div className="flex justify-between items-center mb-2 border-b pb-1">
-                        <h3 className="font-bold text-green-700 flex items-center gap-2"><TrailerIcon className="w-4 h-4"/>{trailer}</h3>
-                        {trailer !== 'Sem Carretinha' && (
-                          <button onClick={() => handleFinalizeTrailer(trailer)} className="text-[10px] bg-green-600 text-white px-2 py-0.5 rounded font-bold hover:bg-green-700">Finalizar Carretinha</button>
+            {activeMechanicCategory === 'Manutenção' && (
+              <div id="section-manutencao" className="p-4 border rounded-lg bg-orange-50 shadow-sm scroll-mt-4">
+                <h2 className="text-lg font-bold text-orange-800 mb-3 flex items-center gap-2"><BicycleIcon className="w-5 h-5"/>Mecânica - Em Manutenção</h2>
+                {mechanicsList.filter(b => b.status === 'Em Manutenção').length > 0 ? (
+                  <div className="space-y-2">
+                    {mechanicsList.filter(b => b.status === 'Em Manutenção').map((bike, i) => (
+                      <div key={`mec-manut-${bike.patrimonio}-${i}`} className="flex justify-between items-center p-3 bg-white border rounded-md shadow-sm">
+                        <div>
+                          <span className="font-bold text-gray-700">Bike: {bike.patrimonio}</span>
+                          <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+                            {bike.bateria !== undefined && <p className="text-[10px] text-gray-600">Bateria: {bike.bateria}%</p>}
+                            {bike.carregamento && <p className="text-[10px] text-green-600 font-bold">⚡ Carregando</p>}
+                          </div>
+                          {bike.mecanico && <p className="text-[10px] font-bold text-blue-600">Mecânico: {bike.mecanico}</p>}
+                          {bike.tratativa && <p className="text-[10px] text-gray-500 italic">Obs: {bike.tratativa}</p>}
+                        </div>
+                        <button onClick={() => { setSelectedMechanicBike(bike); setIsMechanicRepairModalOpen(true); }} className="px-3 py-1 bg-orange-600 text-white text-xs font-bold rounded hover:bg-orange-700 active:scale-95">Finalizar Reparo</button>
+                      </div>
+                    ))}
+                  </div>
+                ) : <p className="text-sm text-gray-500 italic">Nenhuma bike.</p>}
+              </div>
+            )}
+
+            {activeMechanicCategory === 'Reserva' && (
+              <div id="section-reserva" className="p-4 border rounded-lg bg-green-50 shadow-sm scroll-mt-4">
+                <h2 className="text-lg font-bold text-green-800 mb-3 flex items-center gap-2"><TrailerIcon className="w-5 h-5"/>Reserva - Prontas para Remanejamento</h2>
+                {mechanicsList.filter(b => b.status === 'Reserva').length > 0 ? (
+                  <div className="space-y-4">
+                    {Object.entries(
+                      mechanicsList.filter(b => b.status === 'Reserva').reduce((acc, bike) => {
+                        const key = bike.carretinha || 'Sem Carretinha';
+                        if (!acc[key]) acc[key] = [];
+                        acc[key].push(bike);
+                        return acc;
+                      }, {} as Record<string, any[]>)
+                    ).map(([trailer, bikes]) => (
+                      <div key={trailer} className="border border-green-200 rounded-md bg-white p-3 shadow-sm">
+                        <div className="flex justify-between items-center mb-2 border-b pb-1">
+                          <h3 className="font-bold text-green-700 flex items-center gap-2"><TrailerIcon className="w-4 h-4"/>{trailer}</h3>
+                          {trailer !== 'Sem Carretinha' && (
+                            <button onClick={() => handleFinalizeTrailer(trailer)} className="text-[10px] bg-green-600 text-white px-2 py-0.5 rounded font-bold hover:bg-green-700">Finalizar Carretinha</button>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-3 gap-2">
+                          {(bikes as any[]).map((bike, i) => (
+                            <div key={`trailer-${bike.patrimonio}-${i}`} className="text-xs p-1.5 bg-gray-50 border rounded text-center font-medium text-gray-700 flex flex-col items-center gap-0.5">
+                              <span className="font-bold">{bike.patrimonio}</span>
+                              <div className="flex flex-col items-center scale-90 origin-top">
+                                {bike.bateria !== undefined && <span className="text-[8px] text-gray-500">{bike.bateria}%</span>}
+                                {bike.carregamento && <span className="text-[8px] text-green-600 font-bold">⚡</span>}
+                              </div>
+                              {bike.mecanico && <span className="text-[7px] text-blue-600 truncate max-w-full">{bike.mecanico}</span>}
+                            </div>
+                          ))}
+                        </div>
+                        {trailer === 'Sem Carretinha' && (
+                          <button onClick={() => { setSelectedBikesForTrailer((bikes as any[]).map(b => b.patrimonio)); setIsTrailerSelectionModalOpen(true); }}
+                            className="mt-3 w-full py-1.5 bg-blue-600 text-white text-[10px] font-bold rounded hover:bg-blue-700">
+                            Organizar em Carretinha
+                          </button>
                         )}
                       </div>
-                      <div className="grid grid-cols-3 gap-2">
-                        {(bikes as any[]).map(bike => (
-                          <div key={bike.patrimonio} className="text-xs p-1 bg-gray-50 border rounded text-center font-medium text-gray-700 flex flex-col items-center">
-                            <span>{bike.patrimonio}</span>
-                            {bike.bateria !== undefined && <span className="text-[8px] text-gray-500">{bike.bateria}%</span>}
-                          </div>
-                        ))}
-                      </div>
-                      {trailer === 'Sem Carretinha' && (
-                        <button onClick={() => { setSelectedBikesForTrailer((bikes as any[]).map(b => b.patrimonio)); setIsTrailerSelectionModalOpen(true); }}
-                          className="mt-3 w-full py-1.5 bg-blue-600 text-white text-[10px] font-bold rounded hover:bg-blue-700">
-                          Organizar em Carretinha
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ) : <p className="text-sm text-gray-500 italic">Nenhuma bike na reserva.</p>}
-            </div>
+                    ))}
+                  </div>
+                ) : <p className="text-sm text-gray-500 italic">Nenhuma bike na reserva.</p>}
+              </div>
+            )}
           </div>
         )}
 
@@ -1749,8 +2047,8 @@ const MainScreen: React.FC<MainScreenProps> = ({
                       {backendVersion && <span className="text-[9px] text-gray-400 font-mono ml-2">v{backendVersion}</span>}
                     </h2>
                     <div className="flex bg-white border rounded-md p-0.5 shadow-sm">
-                      {(['-1','-7','day','week','month'] as const).map(r => (
-                        <button key={r} onClick={() => setSummaryTimeRange(r)}
+                      {(['-1','-7','day','week','month'] as const).map((r, i) => (
+                        <button key={`period-adm-${r}-${i}`} onClick={() => setSummaryTimeRange(r)}
                           className={`px-2 py-0.5 text-[10px] font-bold uppercase rounded ${summaryTimeRange === r ? 'bg-blue-600 text-white' : 'text-gray-500 hover:bg-gray-100'}`}>
                           {r === '-1' ? '-1' : r === '-7' ? '-7' : r === 'day' ? 'Dia' : r === 'week' ? 'Sem' : 'Mês'}
                         </button>
@@ -1759,8 +2057,8 @@ const MainScreen: React.FC<MainScreenProps> = ({
                   </div>
                   {driversSummary.length > 0 ? (
                     <div className="grid grid-cols-1 gap-3">
-                      {driversSummary.map(driver => (
-                        <div key={driver.name} className="bg-white p-3 rounded-lg border shadow-sm">
+                      {driversSummary.map((driver, i) => (
+                        <div key={`driver-card-${driver.name}-${i}`} className="bg-white p-3 rounded-lg border shadow-sm">
                           <div className="flex justify-between items-center mb-2 border-b pb-1">
                             <h3 className="font-black text-gray-900 text-sm uppercase">{driver.name}</h3>
                             <button onClick={() => { setEditingDriver(driver); setIsEditDriverModalOpen(true); }} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-full">
@@ -1774,8 +2072,8 @@ const MainScreen: React.FC<MainScreenProps> = ({
                               { l: 'Remanej.', v: driver.stats.remanejada, c: 'indigo' },
                               { l: 'Não Enc.', v: driver.stats.naoEncontrada, c: 'red' },
                               { l: 'Não Atend.', v: driver.stats.naoAtendida || 0, c: 'orange' },
-                            ].map(item => (
-                              <div key={item.l} className={`bg-${item.c}-50 p-1.5 rounded border border-${item.c}-100 text-center`}>
+                            ].map((item, i) => (
+                              <div key={`adm-stat-${item.l}-${i}`} className={`bg-${item.c}-50 p-1.5 rounded border border-${item.c}-100 text-center`}>
                                 <p className={`text-[8px] text-${item.c}-600 font-black uppercase leading-tight`}>{item.l}</p>
                                 <p className={`text-sm font-black text-${item.c}-800`}>{item.v}</p>
                               </div>
@@ -1810,8 +2108,8 @@ const MainScreen: React.FC<MainScreenProps> = ({
                         ))}
                       </tr></thead>
                       <tbody>
-                        {alerts.length > 0 ? alerts.map(alert => (
-                          <tr key={alert.id} className="border-b hover:bg-gray-50">
+                        {alerts.length > 0 ? alerts.map((alert, i) => (
+                          <tr key={`alert-${alert.id}-${i}`} className="border-b hover:bg-gray-50">
                             <td className="p-2 font-mono text-xs font-bold text-gray-700">{alert.patrimonio}</td>
                             {['check1','check2','check3'].map(c => (
                               <td key={c} className="p-2 text-center"><input type="checkbox" checked={!!alert[c]} readOnly className="w-4 h-4 rounded border-gray-300"/></td>
@@ -1841,8 +2139,8 @@ const MainScreen: React.FC<MainScreenProps> = ({
                         ))}
                       </tr></thead>
                       <tbody>
-                        {vandalizedBikes.length > 0 ? vandalizedBikes.map(v => (
-                          <tr key={v.id} className="border-b hover:bg-gray-50">
+                        {vandalizedBikes.length > 0 ? vandalizedBikes.map((v, i) => (
+                          <tr key={`vand-${v.id}-${i}`} className="border-b hover:bg-gray-50">
                             <td className="p-2 font-mono text-xs font-bold text-gray-700">{v.patrimonio}</td>
                             <td className="p-2 text-[10px] text-gray-600">{new Date(v.data).toLocaleDateString()}</td>
                             <td className="p-2 text-[10px] text-gray-600">{v.defeito}</td>
@@ -1902,7 +2200,16 @@ const MainScreen: React.FC<MainScreenProps> = ({
         {/* ROTEIRO DE RECOLHAS */}
         {!isAdm && !isMecanica && (
           <div className="mt-6 p-4 border rounded-lg bg-gray-50">
-            <h2 className="text-lg font-semibold text-gray-700 mb-3">Roteiro de Recolhas</h2>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-lg font-semibold text-gray-700">Roteiro de Recolhas</h2>
+              <button 
+                onClick={() => setIsRouteConfigOpen(true)}
+                className="p-2 text-gray-400 hover:text-blue-600 transition-colors rounded-full hover:bg-blue-50"
+                title="Configurar Roteiro"
+              >
+                <Settings size={20} />
+              </button>
+            </div>
             {sortedRouteBikes.length > 0 ? (
               <ul className="space-y-2">
                 {sortedRouteBikes.map(bike => {
@@ -1956,8 +2263,8 @@ const MainScreen: React.FC<MainScreenProps> = ({
             <h2 className="text-lg font-semibold text-gray-700 mb-3">Bikes Recolhidas</h2>
             {sortedCollectedBikes.length > 0 ? (
               <ul className="space-y-2">
-                {sortedCollectedBikes.map(bike => (
-                  <li key={bike} className="p-3 bg-white border rounded-md flex flex-col sm:flex-row justify-between items-center gap-2">
+                {sortedCollectedBikes.map((bike, i) => (
+                  <li key={`route-${bike}-${i}`} className="p-3 bg-white border rounded-md flex flex-col sm:flex-row justify-between items-center gap-2">
                     <div className="flex items-center gap-3">
                       <p className="font-mono text-gray-800 font-bold text-lg">{bike}</p>
                       {collectedBikesDetails[bike]?.battery !== undefined && (
@@ -1978,6 +2285,122 @@ const MainScreen: React.FC<MainScreenProps> = ({
       </main>
 
       {/* MODAIS */}
+      {/* Modal de Configuração de Roteiro */}
+      {isRouteConfigOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-[2px]">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-[320px] overflow-hidden animate-in fade-in zoom-in duration-150">
+            <div className="p-3 border-b border-gray-100 flex items-center justify-between bg-white text-gray-800">
+              <div className="flex items-center gap-2">
+                <Settings size={16} className="text-blue-600" />
+                <h3 className="text-sm font-bold tracking-tight">Configurar Roteiro</h3>
+              </div>
+              <button onClick={() => setIsRouteConfigOpen(false)} className="p-1 hover:bg-gray-100 rounded-full transition-colors text-gray-400">
+                <XIcon size={18} />
+              </button>
+            </div>
+
+            <div className="p-3 space-y-4 max-h-[65vh] overflow-y-auto">
+              {/* Origem da Localização */}
+              <div className="space-y-1.5">
+                <label className="text-[9px] font-bold text-gray-400 uppercase tracking-widest">Localização</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setRouteConfig(prev => ({ ...prev, locationSource: 'gps' }))}
+                    className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg border transition-all text-[11px] ${
+                      routeConfig.locationSource === 'gps' 
+                        ? 'border-blue-600 bg-blue-50 text-blue-700 font-bold' 
+                        : 'border-gray-100 text-gray-500 hover:bg-gray-50'
+                    }`}
+                  >
+                    <Locate size={12} />
+                    <span>GPS Atual</span>
+                  </button>
+                  <button
+                    onClick={() => setRouteConfig(prev => ({ ...prev, locationSource: 'zone' }))}
+                    className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg border transition-all text-[11px] ${
+                      routeConfig.locationSource === 'zone' 
+                        ? 'border-blue-600 bg-blue-50 text-blue-700 font-bold' 
+                        : 'border-gray-100 text-gray-500 hover:bg-gray-50'
+                    }`}
+                  >
+                    <Map size={12} />
+                    <span>Por Zona</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Seleção de Zona (se habilitado) */}
+              {routeConfig.locationSource === 'zone' && (
+                <div className="space-y-1.5 animate-in slide-in-from-top-1 duration-150">
+                  <label className="text-[9px] font-bold text-gray-400 uppercase tracking-widest text-center block">Zona</label>
+                  <div className="flex justify-center">
+                    <div className="grid grid-cols-3 gap-1 w-fit">
+                      <div />
+                      <ZoneButton id="norte" icon={<ChevronUp size={14} />} label="N" config={routeConfig} setConfig={setRouteConfig} />
+                      <div />
+                      <ZoneButton id="oeste" icon={<ChevronLeft size={14} />} label="O" config={routeConfig} setConfig={setRouteConfig} />
+                      <ZoneButton id="central" icon={<Circle size={14} />} label="C" config={routeConfig} setConfig={setRouteConfig} />
+                      <ZoneButton id="leste" icon={<ChevronRight size={14} />} label="L" config={routeConfig} setConfig={setRouteConfig} />
+                      <div />
+                      <ZoneButton id="sul" icon={<ChevronDown size={14} />} label="S" config={routeConfig} setConfig={setRouteConfig} />
+                      <div />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Filtros de Problemas */}
+              <div className="space-y-1.5">
+                <label className="text-[9px] font-bold text-gray-400 uppercase tracking-widest">Filtros</label>
+                <div className="space-y-1">
+                  {[
+                    { id: 'lowBattery', label: 'Bateria Baixa (<50%)', icon: <Battery size={14} className="text-red-500" /> },
+                    { id: 'openLock', label: 'Trava Aberta', icon: <Lock size={14} className="text-orange-500" /> },
+                    { id: 'outOfStation', label: 'Fora de Estação', icon: <MapIconLucide size={14} className="text-purple-500" /> },
+                    { id: 'offline', label: 'Offline (>30min)', icon: <WifiOff size={14} className="text-gray-400" /> },
+                    { id: 'wrongStatus', label: 'Status Incorreto', icon: <AlertCircle size={14} className="text-yellow-500" /> },
+                  ].map((filter) => (
+                    <label key={filter.id} className="flex items-center justify-between p-1.5 rounded-lg bg-gray-50 hover:bg-gray-100 transition-colors cursor-pointer">
+                      <div className="flex items-center gap-2">
+                        {filter.icon}
+                        <span className="text-[11px] font-medium text-gray-600">{filter.label}</span>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={(routeConfig.filters as any)[filter.id]}
+                        onChange={(e) => setRouteConfig(prev => ({
+                          ...prev,
+                          filters: { ...prev.filters, [filter.id]: e.target.checked }
+                        }))}
+                        className="w-3.5 h-3.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500 transition-all"
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="p-3 bg-white border-t border-gray-100">
+              <button
+                onClick={handleGenerateRoute}
+                disabled={isLoading}
+                className="w-full bg-blue-600 text-white py-2 rounded-lg font-bold text-xs shadow-md hover:bg-blue-700 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isLoading ? (
+                  <RefreshCw size={14} className="animate-spin" />
+                ) : (
+                  <Play size={14} fill="currentColor" />
+                )}
+                GERAR ROTA
+              </button>
+              <p className="text-center text-[8px] text-gray-400 mt-1.5 uppercase tracking-widest font-bold">
+                Máximo 20 bikes · Raio 3km
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       <RequestModal isOpen={isRequestModalOpen} onClose={() => setRequestModalOpen(false)} onSubmit={handleCreateRequest} isLoading={isLoading} motoristas={motoristas} driverLocations={driverLocations} error={error} clearError={() => setError(null)}/>
       <EditDriverModal isOpen={isEditDriverModalOpen} onClose={() => setIsEditDriverModalOpen(false)} driver={editingDriver} onSave={handleUpdateDriverState} isLoading={isLoading}/>
       <RouteModal isOpen={isRouteModalOpen} onClose={() => setRouteModalOpen(false)} onSubmit={handleCreateRoute} isLoading={isLoading} pendingBikeNumbers={allActiveBikes} motoristas={motoristas} error={error} clearError={() => setError(null)} type="route"/>
