@@ -319,6 +319,7 @@ function doPost(e) {
       case 'getAdminAlerts':        response = { ...getAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
       case 'clearAdminAlerts':      response = { ...clearAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
       case 'getDirections':        response = { ...getDirections(request.fromLat, request.fromLng, request.toLat, request.toLng), version: BACKEND_VERSION }; break;
+      case 'getBikeMovement':      response = { ...getBikeMovement(request.bikeNumber, request.limit), version: BACKEND_VERSION }; break;
       case 'confirmMechanicsReceipt': response = { ...confirmMechanicsReceipt(request.bikeNumber, request.mechanicName), version: BACKEND_VERSION }; break;
       case 'insertBikeMechanics':   response = { ...insertBikeMechanics(request.bikeNumber, request.driverName, request.targetStatus), version: BACKEND_VERSION }; break;
       case 'notifyAdmins':          response = { ...notifyAdmins(request.message, request.bikes, request.trailerName), version: BACKEND_VERSION }; break;
