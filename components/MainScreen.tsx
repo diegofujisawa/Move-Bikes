@@ -889,35 +889,35 @@ const MainScreen: React.FC<MainScreenProps> = ({
     setPendingRequests(prev => prev.filter(r => String(r.id) !== String(requestId)));
 
     try {
-      // IDs numéricos vêm do Sheets (número da linha) — não existem no Firestore.
-      // IDs alfanuméricos longos vêm do Firestore — podem ser atualizados diretamente.
+      // IDs numéricos vêm do Sheets — não existem no Firestore.
       const isFirestoreId = String(requestId).length > 10 && isNaN(Number(requestId));
       if (isFirestoreId) {
-        await updateDoc(doc(db, 'requests', String(requestId)), {
+        updateDoc(doc(db, 'requests', String(requestId)), {
           status: 'ACEITO', driverName, acceptedAt: serverTimestamp()
-        });
+        }).catch(e => console.warn('[Firebase] requests update:', e.code));
       }
-      // Se vier do Sheets, o Sheets cuida do status via apiCall abaixo
 
-      const snap = await getDoc(doc(db, 'users', driverName));
-      const userData = snap.data() || {};
-      let newRoute: string[] = userData.routeBikes || [];
-      let newCollected: string[] = userData.collectedBikes || [];
+      // Lê estado atual do Sheets (fonte de verdade) em vez do Firebase
+      const stateResult = await apiCall({ action: 'getDriverState', driverName }, 1, true);
+      let newRoute: string[] = stateResult.success ? (stateResult.data?.routeBikes || []) : routeBikes;
+      let newCollected: string[] = stateResult.success ? (stateResult.data?.collectedBikes || []) : collectedBikes;
 
       if (isTrailer) {
         newCollected = [...new Set([...newCollected, ...bikesToAdd])];
         newRoute = newRoute.filter(b => !bikesToAdd.includes(String(b)));
         setCollectedBikes(newCollected);
         setRouteBikes(newRoute);
-        await Promise.all(bikesToAdd.map(id => setDoc(doc(db, 'bikes', id), {
-          status: 'Recolhida', responsavel: driverName, ultimaAtualizacao: serverTimestamp()
-        }, { merge: true })));
-        // Registra no Relatório para aparecer na timeline
+        // Firebase não-bloqueante
+        bikesToAdd.forEach(id => {
+          setDoc(doc(db, 'bikes', id), {
+            status: 'Recolhida', responsavel: driverName, ultimaAtualizacao: serverTimestamp()
+          }, { merge: true }).catch(e => console.warn('[Firebase] bikes write:', e.code));
+        });
+        // Registra no Relatório e timeline
         bikesToAdd.forEach(id => {
           apiCall({ action: 'logReport', rowData: [
             new Date().toISOString(), id, 'Recolhida', 'Recebida via carretinha', driverName, '', '', '', ''
           ]}, 1, true).catch(() => {});
-          // Evento de timeline Firebase
           addDoc(collection(db, 'timeline_events'), {
             driverName, bikeNumber: id, type: 'recolhida',
             timestamp: serverTimestamp(),
@@ -929,9 +929,12 @@ const MainScreen: React.FC<MainScreenProps> = ({
         newCollected = newCollected.filter(b => !bikesToAdd.includes(String(b)));
         setRouteBikes(newRoute);
         setCollectedBikes(newCollected);
-        await Promise.all(bikesToAdd.map(id => setDoc(doc(db, 'bikes', id), {
-          status: 'Em Rota', responsavel: driverName, ultimaAtualizacao: serverTimestamp()
-        }, { merge: true })));
+        // Firebase não-bloqueante
+        bikesToAdd.forEach(id => {
+          setDoc(doc(db, 'bikes', id), {
+            status: 'Em Rota', responsavel: driverName, ultimaAtualizacao: serverTimestamp()
+          }, { merge: true }).catch(e => console.warn('[Firebase] bikes write:', e.code));
+        });
       }
 
       await persistDriverState(newRoute, newCollected);
@@ -962,9 +965,9 @@ const MainScreen: React.FC<MainScreenProps> = ({
     try {
       const isFirestoreId = String(requestId).length > 10 && isNaN(Number(requestId));
       if (isFirestoreId) {
-        await updateDoc(doc(db, 'requests', String(requestId)), {
+        updateDoc(doc(db, 'requests', String(requestId)), {
           status: 'RECUSADO', declinedBy: driverName, declinedAt: serverTimestamp()
-        });
+        }).catch(e => console.warn('[Firebase] requests decline:', e.code));
       }
       apiCall({ action: 'declineRequest', requestId, driverName }, 1, true)
         .catch(e => console.warn('[Sheets] declineRequest:', e));
