@@ -72,6 +72,7 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
 
     locations.forEach(loc => {
       const { driverName, latitude, longitude } = loc;
+      const isStale = (loc as any).stale === true;
       const normLat = normalizeCoord(latitude);
       const normLng = normalizeCoord(longitude);
 
@@ -81,14 +82,25 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
       activeDrivers.add(driverName);
       markerGroup.push(position);
 
+      // Cor do tooltip: azul = GPS recente, laranja = GPS desatualizado (>10min)
+      const tooltipClass = isStale
+        ? 'bg-orange-500 text-white font-bold px-2 py-1 rounded shadow-lg border-none'
+        : 'bg-blue-600 text-white font-bold px-2 py-1 rounded shadow-lg border-none';
+      const label = isStale ? `${driverName} ⚠️` : driverName;
+
       if (currentMarkers[driverName]) {
         currentMarkers[driverName].setLatLng(position);
+        // Atualiza tooltip se mudou de estado stale
+        currentMarkers[driverName].unbindTooltip();
+        currentMarkers[driverName].bindTooltip(label, {
+          permanent: true, direction: 'top', className: tooltipClass
+        });
       } else {
         const marker = L.marker(position, { title: driverName }).addTo(map);
-        marker.bindTooltip(driverName, {
+        marker.bindTooltip(label, {
           permanent: true,
           direction: 'top',
-          className: 'bg-blue-600 text-white font-bold px-2 py-1 rounded shadow-lg border-none'
+          className: tooltipClass
         });
         currentMarkers[driverName] = marker;
       }
@@ -133,9 +145,22 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
         const data = doc.data();
         const driverName = data.name || data.login || doc.id;
 
+        console.log(`[Mapa] Doc: ${doc.id}`, {
+          name: data.name,
+          login: data.login,
+          category: data.category,
+          currentLat: data.currentLat,
+          currentLng: data.currentLng,
+          gps: data.gps,
+          gpsString: data.gpsString,
+        });
+
         // Ignora não-motoristas
         const cat = (data.category || '').toString().toUpperCase();
-        if (!cat.includes('MOTORISTA')) return;
+        if (!cat.includes('MOTORISTA')) {
+          console.log(`[Mapa] Ignorando ${doc.id} — categoria: ${cat}`);
+          return;
+        }
 
         // Tenta ler coordenadas — suporta múltiplos formatos:
 

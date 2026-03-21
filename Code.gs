@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '83.5-directions-proxy';
+const BACKEND_VERSION = '83.7-realtime-gps';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -794,7 +794,8 @@ function getDriverLocations(providedData) {
 
   const locations = [];
   const now = new Date();
-  const TEN_MIN = 10 * 60 * 1000;
+  const TEN_MIN   = 10 * 60 * 1000;
+  const TWO_HOURS = 2 * 60 * 60 * 1000;
 
   data.forEach(row => {
     const status = (row[COLUMN_INDICES.ACCESS.STATUS_ONLINE - 1] || '').toString().toUpperCase();
@@ -805,8 +806,9 @@ function getDriverLocations(providedData) {
       const parts = gpsString.split('|');
       const coordsString = parts[0];
       const timestampStr = parts.length > 1 ? parts[1] : null;
-      const isValid = !timestampStr || (now - new Date(parseInt(timestampStr, 10)) <= TEN_MIN);
-      if (!isValid) return;
+      const ageMs = timestampStr ? now - new Date(parseInt(timestampStr, 10)) : 0;
+      // Remove apenas se GPS for mais antigo que 2 horas
+      if (timestampStr && ageMs > TWO_HOURS) return;
 
       let coords = coordsString.split(';');
       if (coords.length < 2) coords = coordsString.split(',');
@@ -821,7 +823,8 @@ function getDriverLocations(providedData) {
         latitude: lat, longitude: lon,
         timestamp: timestampStr
           ? new Date(parseInt(timestampStr, 10)).toISOString()
-          : new Date().toISOString()
+          : new Date().toISOString(),
+        stale: timestampStr ? ageMs > TEN_MIN : false  // GPS desatualizado (>10min) mas ainda visível
       });
     } catch (e) {
       Logger.log(`GPS inválido para ${row[COLUMN_INDICES.ACCESS.USUARIO - 1]}: ${gpsString}`);

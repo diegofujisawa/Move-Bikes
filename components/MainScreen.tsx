@@ -581,7 +581,30 @@ const MainScreen: React.FC<MainScreenProps> = ({
       }, err => console.error('Listener timeline:', err));
     }
 
-    return () => { unsubRequests(); unsubAlerts(); unsubUser(); unsubNotifications(); unsubTimeline(); unsubReload(); };
+    // Listener de posições dos motoristas em tempo real (ADM)
+    let unsubLocations = () => {};
+    if (isAdm) {
+      unsubLocations = onSnapshot(collection(db, 'locations'), snapshot => {
+        const liveLocations: any[] = [];
+        snapshot.forEach(d => {
+          const data = d.data();
+          if (!data.latitude || !data.longitude) return;
+          const ts = data.timestamp?.toDate?.()?.getTime() || 0;
+          const ageMs = Date.now() - ts;
+          if (ageMs > 2 * 60 * 60 * 1000) return; // ignora posições >2h
+          liveLocations.push({
+            driverName: data.driverName || d.id,
+            latitude: data.latitude,
+            longitude: data.longitude,
+            timestamp: data.timestamp?.toDate?.()?.toISOString() || new Date().toISOString(),
+            stale: ageMs > 10 * 60 * 1000,
+          });
+        });
+        if (liveLocations.length > 0) setDriverLocations(liveLocations);
+      }, err => console.error('Listener locations:', err));
+    }
+
+    return () => { unsubRequests(); unsubAlerts(); unsubUser(); unsubNotifications(); unsubTimeline(); unsubReload(); unsubLocations(); };
   }, [driverName, isAdm]);
 
   // =================================================================
@@ -1834,39 +1857,67 @@ const MainScreen: React.FC<MainScreenProps> = ({
     if (Object.keys(dists).length > 0) setRouteDistances(prev => ({ ...prev, ...dists }));
   }, [currentDriverLocation, routeBikes, routeBikesDetails]);
 
-  // GPS
+  // GPS — atualização contínua a cada 15s mesmo parado
   useEffect(() => {
     if (category.toUpperCase() !== 'MOTORISTA') return;
     if (!navigator.geolocation) { setGpsError('Seu navegador não suporta geolocalização.'); return; }
+
+    let lastSentLat = 0, lastSentLng = 0, lastSentTime = 0;
+
+    const sendLocation = (latitude: number, longitude: number) => {
+      const now = Date.now();
+      const movedMeters = getDistanceInMeters(latitude, longitude, lastSentLat, lastSentLng);
+      const elapsed = now - lastSentTime;
+
+      // Envia se: moveu >5m OU passaram 15s desde o último envio
+      if (movedMeters > 5 || elapsed > 15000) {
+        lastSentLat = latitude;
+        lastSentLng = longitude;
+        lastSentTime = now;
+        lastLocationRef.current = { lat: latitude, lng: longitude };
+
+        // Firebase — lido pelo listener do ADM em tempo real
+        setDoc(doc(db, 'locations', driverName), {
+          driverName,
+          latitude,
+          longitude,
+          timestamp: serverTimestamp(),
+          category,
+        }, { merge: true }).catch(() => {});
+
+        // Sheets — atualiza a planilha para persistência
+        apiGetCall('updateLocation', {
+          driverName,
+          latitude: latitude.toFixed(6),
+          longitude: longitude.toFixed(6)
+        }).catch(() => {});
+      }
+    };
+
     const watchId = navigator.geolocation.watchPosition(
       ({ coords: { latitude, longitude } }) => {
         setGpsError(null);
         setCurrentDriverLocation({ lat: latitude, lng: longitude });
-        const now = Date.now();
-        const last = lastLocationRef.current;
-        if (now - lastLocationUpdateRef.current > 10000) {
-          const moved = !last || getDistanceInMeters(latitude, longitude, last.lat, last.lng) > 10;
-          if (moved) {
-            lastLocationUpdateRef.current = now;
-            lastLocationRef.current = { lat: latitude, lng: longitude };
-            setDoc(doc(db, 'users', driverName), {
-              currentLat: latitude,
-              currentLng: longitude,
-              lastLocationUpdate: serverTimestamp(),
-              category,
-              name: driverName, // garante que o mapa consiga identificar o motorista
-            }, { merge: true }).catch(() => {});
-            apiGetCall('updateLocation', { driverName, latitude: latitude.toFixed(6), longitude: longitude.toFixed(6) }).catch(() => {});
-          }
-        }
+        sendLocation(latitude, longitude);
       },
       err => {
         if (err.code === err.PERMISSION_DENIED) setGpsError('Acesso ao GPS negado. O aplicativo requer localização ativa.');
         else if (err.code === err.POSITION_UNAVAILABLE) setGpsError('Localização indisponível. Verifique se o GPS está ligado.');
       },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 5000 }
     );
-    return () => navigator.geolocation.clearWatch(watchId);
+
+    // Garante envio a cada 15s mesmo se watchPosition não disparar (app em background)
+    const forceInterval = setInterval(() => {
+      if (lastLocationRef.current) {
+        sendLocation(lastLocationRef.current.lat, lastLocationRef.current.lng);
+      }
+    }, 15000);
+
+    return () => {
+      navigator.geolocation.clearWatch(watchId);
+      clearInterval(forceInterval);
+    };
   }, [driverName, category]);
 
   // =================================================================
