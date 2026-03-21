@@ -1882,10 +1882,11 @@ const MainScreen: React.FC<MainScreenProps> = ({
       lastSentTime = now;
       lastLocationRef.current = { lat: latitude, lng: longitude };
 
-      // Firebase tempo real
+      // Firebase tempo real — inclui status LOGADO
       setDoc(doc(db, 'locations', driverName), {
         driverName, latitude, longitude,
         timestamp: serverTimestamp(), category,
+        status: 'LOGADO',
       }, { merge: true }).catch(() => {});
 
       // Sheets — persistência
@@ -1954,11 +1955,35 @@ const MainScreen: React.FC<MainScreenProps> = ({
     startWatch();
     document.addEventListener('visibilitychange', onVisibility);
 
+    const markOffline = () => {
+      // deleteDoc via fetch não funciona no beforeunload — usa setDoc com DESLOGADO
+      // O beforeunload não garante async, mas o Firebase SDK tem buffer local
+      setDoc(doc(db, 'locations', driverName), {
+        status: 'DESLOGADO',
+        latitude: null,
+        longitude: null,
+        timestamp: serverTimestamp(),
+      }, { merge: true }).catch(() => {});
+    };
+
+    // Detecta fechamento de aba/browser
+    window.addEventListener('beforeunload', markOffline);
+    window.addEventListener('pagehide', markOffline);
+
     return () => {
       if (watchId !== null) navigator.geolocation.clearWatch(watchId);
       clearInterval(fallbackInterval);
       document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('beforeunload', markOffline);
+      window.removeEventListener('pagehide', markOffline);
       if (wakeLock) wakeLock.release().catch(() => {});
+      // Marca como deslogado no Firebase ao sair (botão logout)
+      setDoc(doc(db, 'locations', driverName), {
+        status: 'DESLOGADO',
+        latitude: null,
+        longitude: null,
+        timestamp: serverTimestamp(),
+      }, { merge: true }).catch(() => {});
     };
   }, [driverName, category]);
 

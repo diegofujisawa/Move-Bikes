@@ -3,7 +3,6 @@ import { LogoutIcon, MapIcon, XIcon, MovingIcon } from './icons';
 import { DriverLocation } from '../types';
 import { db } from '../firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
-import { apiGetCall } from '../api';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -23,45 +22,10 @@ const normalizeCoord = (coord: number): number => {
   return val;
 };
 
-// Parseia string de GPS da planilha: "lat;lng|timestamp" ou "lat,lng|timestamp"
-const parseGpsString = (gpsString: string): { lat: number, lng: number } | null => {
-  if (!gpsString || typeof gpsString !== 'string') return null;
-  try {
-    const parts = gpsString.split('|');
-    const coords = parts[0].split(';').length >= 2
-      ? parts[0].split(';')
-      : parts[0].split(',');
-    if (coords.length < 2) return null;
-    const lat = parseFloat(coords[0].replace(',', '.'));
-    const lng = parseFloat(coords[1].replace(',', '.'));
-    if (isNaN(lat) || isNaN(lng)) return null;
-    return { lat: normalizeCoord(lat), lng: normalizeCoord(lng) };
-  } catch { return null; }
-};
-
-const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose, driverLocations: propLocations = [] }) => {
+const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [driverCount, setDriverCount] = useState(0);
-  const [sheetsLocations, setSheetsLocations] = useState<any[]>(propLocations);
-
-  // Busca lista de motoristas logados do Sheets a cada 15s
-  useEffect(() => {
-    const fetchLoggedDrivers = async () => {
-      try {
-        const r = await apiGetCall('getDriverLocations');
-        if (r.success && r.data) setSheetsLocations(r.data);
-      } catch {}
-    };
-    fetchLoggedDrivers();
-    const interval = setInterval(fetchLoggedDrivers, 15000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Sincroniza com prop quando atualizada externamente
-  useEffect(() => {
-    if (propLocations.length > 0) setSheetsLocations(propLocations);
-  }, [propLocations]);
 
   const mapRef = useRef<L.Map | null>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -78,11 +42,9 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose, driverLocations:
         zoomControl: true,
         attributionControl: true
       });
-
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
       }).addTo(map);
-
       mapRef.current = map;
     }
 
@@ -96,40 +58,30 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose, driverLocations:
       const isStale = (loc as any).stale === true;
       const normLat = normalizeCoord(latitude);
       const normLng = normalizeCoord(longitude);
-
       if (isNaN(normLat) || isNaN(normLng) || normLat === 0 || normLng === 0) return;
 
       const position = L.latLng(normLat, normLng);
       activeDrivers.add(driverName);
       markerGroup.push(position);
 
-      // Cor do tooltip: azul = GPS recente, laranja = GPS desatualizado (>10min)
       const tooltipClass = isStale
         ? 'bg-orange-500 text-white font-bold px-2 py-1 rounded shadow-lg border-none'
         : 'bg-blue-600 text-white font-bold px-2 py-1 rounded shadow-lg border-none';
-      const label = isStale ? `${driverName} ⚠️` : driverName;
+      const label = isStale ? (driverName + ' ⚠️') : driverName;
 
       if (currentMarkers[driverName]) {
         currentMarkers[driverName].setLatLng(position);
-        // Atualiza tooltip se mudou de estado stale
         currentMarkers[driverName].unbindTooltip();
-        currentMarkers[driverName].bindTooltip(label, {
-          permanent: true, direction: 'top', className: tooltipClass
-        });
+        currentMarkers[driverName].bindTooltip(label, { permanent: true, direction: 'top', className: tooltipClass });
       } else {
         const marker = L.marker(position, { title: driverName }).addTo(map);
-        marker.bindTooltip(label, {
-          permanent: true,
-          direction: 'top',
-          className: tooltipClass
-        });
+        marker.bindTooltip(label, { permanent: true, direction: 'top', className: tooltipClass });
         currentMarkers[driverName] = marker;
       }
     });
 
     if (markerGroup.length > 0 && !hasCenteredRef.current) {
-      const bounds = L.latLngBounds(markerGroup);
-      map.fitBounds(bounds, { padding: [70, 70] });
+      map.fitBounds(L.latLngBounds(markerGroup), { padding: [70, 70] });
       hasCenteredRef.current = true;
     }
 
@@ -152,57 +104,44 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose, driverLocations:
   }, []);
 
   useEffect(() => {
-    setIsLoading(true);
+    const THIRTY_MIN = 30 * 60 * 1000;
+    const TEN_MIN = 10 * 60 * 1000;
 
-    const unsubscribe = onSnapshot(collection(db, 'locations'), (snapshot) => {
-      const firebaseLocations: any[] = [];
-      const now = Date.now();
-      const TWO_HOURS = 2 * 60 * 60 * 1000;
+    const unsubscribe = onSnapshot(
+      collection(db, 'locations'),
+      (snapshot) => {
+        const locs: any[] = [];
+        const now = Date.now();
 
-      snapshot.forEach((docSnap) => {
-        const data = docSnap.data();
-        if (!data.latitude || !data.longitude) return;
-        const ts = data.timestamp?.toDate?.()?.getTime() || 0;
-        const ageMs = ts ? now - ts : 0;
-        if (ts && ageMs > TWO_HOURS) return;
-        const lat = normalizeCoord(Number(data.latitude));
-        const lng = normalizeCoord(Number(data.longitude));
-        if (isNaN(lat) || isNaN(lng) || lat === 0 || lng === 0) return;
-        firebaseLocations.push({
-          driverName: data.driverName || docSnap.id,
-          latitude: lat,
-          longitude: lng,
-          timestamp: ts ? new Date(ts).toISOString() : '',
-          stale: ts ? ageMs > 10 * 60 * 1000 : false,
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          const status = (data.status || '').toString().toUpperCase();
+          if (status === 'DESLOGADO') return;
+          if (!data.latitude || !data.longitude) return;
+          const ts = data.timestamp?.toDate?.()?.getTime() || 0;
+          const ageMs = ts ? (now - ts) : Infinity;
+          if (ageMs > THIRTY_MIN) return;
+          const lat = normalizeCoord(Number(data.latitude));
+          const lng = normalizeCoord(Number(data.longitude));
+          if (isNaN(lat) || isNaN(lng) || lat === 0 || lng === 0) return;
+          locs.push({
+            driverName: data.driverName || docSnap.id,
+            latitude: lat,
+            longitude: lng,
+            timestamp: ts ? new Date(ts).toISOString() : '',
+            stale: ageMs > TEN_MIN,
+          });
         });
-      });
 
-      // Sheets é fonte de verdade para login/logout
-      // Só mostra motorista no mapa se estiver LOGADO na planilha (sheetsLocations)
-      const loggedNames = new Set(sheetsLocations.map((l: any) => (l.driverName || '').toLowerCase()));
-
-      let finalLocations: DriverLocation[];
-      if (sheetsLocations.length > 0) {
-        // Filtra Firebase pelos logados no Sheets; usa posição Firebase (mais recente) se disponível
-        finalLocations = sheetsLocations.map((sl: any) => {
-          const fbMatch = firebaseLocations.find(
-            fl => fl.driverName.toLowerCase() === (sl.driverName || '').toLowerCase()
-          );
-          return fbMatch || sl; // Firebase tem prioridade na posição, Sheets decide quem aparece
-        });
-      } else {
-        // Fallback: sem dados do Sheets ainda, mostra Firebase filtrado por LOGADO
-        finalLocations = firebaseLocations.filter(fl => loggedNames.size === 0 || loggedNames.has(fl.driverName.toLowerCase())) as DriverLocation[];
+        setIsLoading(false);
+        updateMapWithLocations(locs as DriverLocation[]);
+      },
+      (err) => {
+        console.error('[Mapa] Erro listener locations:', err);
+        setError('Erro ao conectar ao banco de dados.');
+        setIsLoading(false);
       }
-
-      setIsLoading(false);
-      updateMapWithLocations(finalLocations);
-    }, (err) => {
-      console.error('[Mapa] Erro listener locations:', err);
-      // Fallback: usa apenas Sheets
-      if (sheetsLocations.length > 0) updateMapWithLocations(sheetsLocations as DriverLocation[]);
-      setIsLoading(false);
-    });
+    );
 
     return () => {
       unsubscribe();
@@ -213,11 +152,11 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose, driverLocations:
       markersRef.current = {};
       hasCenteredRef.current = false;
     };
-  }, [updateMapWithLocations, sheetsLocations]);
+  }, [updateMapWithLocations]);
 
   return (
     <div className="bg-white p-6 rounded-xl shadow-lg w-full h-full flex flex-col">
-      <header className="flex justify-between items-center mb-4 pb-4 border-b flex-shrink-0">
+      <header className="flex justify-between items-center mb-3 pb-3 border-b flex-shrink-0">
         <div className="flex items-center gap-3">
           <MapIcon className="w-6 h-6 text-blue-600"/>
           <div>
@@ -244,16 +183,26 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose, driverLocations:
         </div>
       </header>
 
+      <div className="flex items-center gap-4 mb-3 px-1">
+        <div className="flex items-center gap-1.5">
+          <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold text-white bg-blue-600">NOME</span>
+          <span className="text-[10px] text-gray-500">GPS atualizado (últimos 10 min)</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold text-white bg-orange-500">NOME</span>
+          <span className="text-[10px] text-gray-500">GPS desatualizado (&gt;10 min)</span>
+        </div>
+      </div>
+
       <main className="flex-grow relative bg-gray-100 rounded-md overflow-hidden">
         <div id="map-container" ref={mapContainerRef} className="w-full h-full z-0"/>
-
         {(isLoading || error) && (
-          <div className="absolute inset-0 flex items-center justify-center bg-gray-100/50 backdrop-blur-sm z-10">
+          <div className="absolute inset-0 flex items-center justify-center bg-gray-100 z-10">
             <div className="bg-white p-6 rounded-lg shadow-2xl text-center">
               {isLoading && (
-                <div className="flex items-center gap-3 text-gray-600">
-                  <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"/>
-                  <span>Carregando mapa...</span>
+                <div className="flex flex-col items-center gap-3 text-gray-600">
+                  <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"/>
+                  <span className="text-sm">Carregando mapa...</span>
                 </div>
               )}
               {error && <p className="text-red-600 font-semibold">{error}</p>}
