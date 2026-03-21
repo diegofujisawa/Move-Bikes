@@ -133,76 +133,33 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
   useEffect(() => {
     setIsLoading(true);
 
-    // Escuta a coleção users no Firestore em tempo real
-    // O MainScreen grava: currentLat, currentLng, lastLocationUpdate, category
-    const q = query(collection(db, 'users'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const unsubscribe = onSnapshot(collection(db, 'locations'), (snapshot) => {
       const locations: DriverLocation[] = [];
       const now = Date.now();
-      const TEN_MIN = 10 * 60 * 1000;
+      const TWO_HOURS = 2 * 60 * 60 * 1000;
 
-      snapshot.forEach((doc) => {
-        const data = doc.data();
-        const driverName = data.name || data.login || doc.id;
-
-        console.log(`[Mapa] Doc: ${doc.id}`, {
-          name: data.name,
-          login: data.login,
-          category: data.category,
-          currentLat: data.currentLat,
-          currentLng: data.currentLng,
-          gps: data.gps,
-          gpsString: data.gpsString,
-        });
-
-        // Ignora não-motoristas
-        const cat = (data.category || '').toString().toUpperCase();
-        if (!cat.includes('MOTORISTA')) {
-          console.log(`[Mapa] Ignorando ${doc.id} — categoria: ${cat}`);
-          return;
-        }
-
-        // Tenta ler coordenadas — suporta múltiplos formatos:
-
-        // Formato 1: currentLat / currentLng (gravado pelo MainScreen.tsx)
-        if (data.currentLat && data.currentLng) {
-          const lat = normalizeCoord(Number(data.currentLat));
-          const lng = normalizeCoord(Number(data.currentLng));
-          if (!isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
-            // Verifica se a localização é recente (10 min)
-            const lastUpdate = data.lastLocationUpdate?.toDate?.()?.getTime?.() || 0;
-            if (!lastUpdate || (now - lastUpdate) <= TEN_MIN) {
-              locations.push({ driverName, latitude: lat, longitude: lng, timestamp: lastUpdate ? new Date(lastUpdate).toISOString() : '' });
-              return;
-            }
-          }
-        }
-
-        // Formato 2: gps.lat / gps.lng (formato antigo)
-        if (data.gps?.lat && data.gps?.lng) {
-          const lat = normalizeCoord(Number(data.gps.lat));
-          const lng = normalizeCoord(Number(data.gps.lng));
-          if (!isNaN(lat) && !isNaN(lng)) {
-            locations.push({ driverName, latitude: lat, longitude: lng, timestamp: data.gps.timestamp || '' });
-            return;
-          }
-        }
-
-        // Formato 3: gpsString "lat;lng|timestamp" (formato da planilha sincronizado)
-        if (data.gpsString) {
-          const parsed = parseGpsString(data.gpsString);
-          if (parsed) {
-            locations.push({ driverName, latitude: parsed.lat, longitude: parsed.lng, timestamp: '' });
-          }
-        }
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data();
+        if (!data.latitude || !data.longitude) return;
+        const ts = data.timestamp?.toDate?.()?.getTime() || 0;
+        const ageMs = ts ? now - ts : 0;
+        if (ts && ageMs > TWO_HOURS) return;
+        const lat = normalizeCoord(Number(data.latitude));
+        const lng = normalizeCoord(Number(data.longitude));
+        if (isNaN(lat) || isNaN(lng) || lat === 0 || lng === 0) return;
+        locations.push({
+          driverName: data.driverName || docSnap.id,
+          latitude: lat,
+          longitude: lng,
+          timestamp: ts ? new Date(ts).toISOString() : '',
+          stale: ts ? ageMs > 10 * 60 * 1000 : false,
+        } as any);
       });
 
-      updateMapWithLocations(locations);
       setIsLoading(false);
-      setError(null);
+      updateMapWithLocations(locations);
     }, (err) => {
-      console.error("Erro ao escutar localizações:", err);
-      setError("Erro ao conectar com o banco de dados em tempo real.");
+      console.error('[Mapa] Erro listener locations:', err);
       setIsLoading(false);
     });
 
