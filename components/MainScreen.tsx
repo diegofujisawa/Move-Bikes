@@ -728,13 +728,10 @@ const MainScreen: React.FC<MainScreenProps> = ({
     setIsLoading(true);
 
     try {
-      // Aguarda autenticação Firebase antes de qualquer escrita
-      await waitForAuth();
-      const userRef = doc(db, 'users', driverName);
-      const snap = await getDoc(userRef);
-      const userData = snap.data() || {};
-      let newRoute: string[] = userData.routeBikes || [];
-      let newCollected: string[] = userData.collectedBikes || [];
+      // Busca estado do Sheets — sem depender do Firebase
+      const stateResult = await apiCall({ action: 'getDriverState', driverName }, 1, true);
+      let newRoute: string[] = stateResult.success ? (stateResult.data?.routeBikes || []) : routeBikes;
+      let newCollected: string[] = stateResult.success ? (stateResult.data?.collectedBikes || []) : collectedBikes;
 
       if (status === 'Recolhida') {
         if (collectedBikes.includes(bikeNumber)) {
@@ -811,21 +808,21 @@ const MainScreen: React.FC<MainScreenProps> = ({
     isUpdatingStateRef.current = true;
     if (!silent) setIsLoading(true);
     try {
-      const snap = await getDoc(doc(db, 'users', driverName));
-      const userData = snap.data() || {};
-      const newRoute = (userData.routeBikes || []).filter((b: string) => String(b) !== bikeNumber);
-      const newCollected = userData.collectedBikes || [];
+      const stateResult = await apiCall({ action: 'getDriverState', driverName }, 1, true);
+      const newRoute = (stateResult.success ? (stateResult.data?.routeBikes || []) : routeBikes)
+        .filter((b: string) => String(b) !== bikeNumber);
+      const newCollected = stateResult.success ? (stateResult.data?.collectedBikes || []) : collectedBikes;
 
       setRouteBikes(newRoute);
       await persistDriverState(newRoute, newCollected);
 
-      await setDoc(doc(db, 'bikes', bikeNumber), {
+      setDoc(doc(db, 'bikes', bikeNumber), {
         status: 'Pendente', responsavel: null, ultimaAtualizacao: serverTimestamp()
-      }, { merge: true });
+      }, { merge: true }).catch(e => console.warn('[Firebase] bikes write:', e.code));
 
-      await addDoc(collection(db, 'reports'), {
+      addDoc(collection(db, 'reports'), {
         driverName, bikeNumber, status: 'Não atendida', timestamp: serverTimestamp(), observation: ''
-      });
+      }).catch(e => console.warn('[Firebase] reports write:', e.code));
 
       apiCall({
         action: 'finalizeRouteBike', driverName, bikeNumber,
@@ -862,10 +859,11 @@ const MainScreen: React.FC<MainScreenProps> = ({
     setCollectedBikes(prev => prev.filter(b => String(b) !== bikeNumber));
 
     try {
-      const snap = await getDoc(doc(db, 'users', driverName));
-      const userData = snap.data() || {};
-      const newCollected = (userData.collectedBikes || []).filter((b: string) => String(b) !== bikeNumber);
-      const newRoute = userData.routeBikes || [];
+      // Busca estado atual do Sheets (fonte de verdade) — sem depender do Firebase
+      const stateResult = await apiCall({ action: 'getDriverState', driverName }, 1, true);
+      const newCollected = (stateResult.success ? (stateResult.data?.collectedBikes || []) : collectedBikes)
+        .filter((b: string) => String(b) !== bikeNumber);
+      const newRoute = stateResult.success ? (stateResult.data?.routeBikes || []) : routeBikes;
 
       await persistDriverState(newRoute, newCollected);
 
@@ -873,15 +871,16 @@ const MainScreen: React.FC<MainScreenProps> = ({
         : status === 'Enviada para Filial' ? 'Filial'
         : status;
 
-      await setDoc(doc(db, 'bikes', bikeNumber), {
+      // Firebase não-bloqueante
+      setDoc(doc(db, 'bikes', bikeNumber), {
         status: finalStatus, responsavel: null,
         observacao: observation, ultimaAtualizacao: serverTimestamp()
-      }, { merge: true });
+      }, { merge: true }).catch(e => console.warn('[Firebase] bikes write:', e.code));
 
-      await addDoc(collection(db, 'reports'), {
+      addDoc(collection(db, 'reports'), {
         driverName, bikeNumber, status: finalStatus,
         observation, timestamp: serverTimestamp()
-      });
+      }).catch(e => console.warn('[Firebase] reports write:', e.code));
 
       apiCall({
         action: 'finalizeCollectedBike', driverName, bikeNumber,
@@ -1235,12 +1234,12 @@ const MainScreen: React.FC<MainScreenProps> = ({
     ));
     setIsMechanicSelectionModalOpen(false);
     try {
-      await updateDoc(doc(db, 'bikes', bikeNumber), { status: 'Mecânica', responsavel: mechanicName, ultimaAtualizacao: serverTimestamp() });
-      await addDoc(collection(db, 'reports'), { bikeNumber, status: 'Mecânica', driverName, mechanicName, timestamp: serverTimestamp(), type: 'Mecânica' });
+      updateDoc(doc(db, 'bikes', bikeNumber), { status: 'Mecânica', responsavel: mechanicName, ultimaAtualizacao: serverTimestamp() }).catch(e => console.warn('[Firebase] bikes write:', e.code));
+      addDoc(collection(db, 'reports'), { bikeNumber, status: 'Mecânica', driverName, mechanicName, timestamp: serverTimestamp(), type: 'Mecânica' }).catch(e => console.warn('[Firebase] reports write:', e.code));
       apiCall({ action: 'confirmMechanicsReceipt', bikeNumber, mechanicName }, 1, true).catch(() => {});
     } catch (err: any) {
       alert('Erro: ' + err.message);
-      refreshAll(true); // reverte em caso de erro
+      refreshAll(true);
     } finally { setIsLoading(false); }
   };
 
@@ -1254,8 +1253,8 @@ const MainScreen: React.FC<MainScreenProps> = ({
     ));
     setIsMechanicRepairModalOpen(false);
     try {
-      await updateDoc(doc(db, 'bikes', bikeNumber), { status: 'Em Estação', responsavel: null, observacao: treatment, ultimaAtualizacao: serverTimestamp() });
-      await addDoc(collection(db, 'reports'), { bikeNumber, status: 'Em Estação', driverName, treatment, timestamp: serverTimestamp(), type: 'Reparo' });
+      updateDoc(doc(db, 'bikes', bikeNumber), { status: 'Em Estação', responsavel: null, observacao: treatment, ultimaAtualizacao: serverTimestamp() }).catch(e => console.warn('[Firebase] bikes write:', e.code));
+      addDoc(collection(db, 'reports'), { bikeNumber, status: 'Em Estação', driverName, treatment, timestamp: serverTimestamp(), type: 'Reparo' }).catch(e => console.warn('[Firebase] reports write:', e.code));
       apiCall({ action: 'finalizeMechanicsRepair', bikeNumber, mechanicName: driverName, treatment }, 1, true).catch(() => {});
     } catch (err: any) {
       alert('Erro: ' + err.message);
@@ -1338,30 +1337,19 @@ const MainScreen: React.FC<MainScreenProps> = ({
     setIsLoading(true);
 
     try {
-      await waitForAuth();
-      // Atualiza Firestore
-      await setDoc(doc(db, 'bikes', bikeNumber), {
-        status: targetStatus,
-        responsavel: driverName,
-        ultimaAtualizacao: serverTimestamp()
-      }, { merge: true });
+      // Firebase não-bloqueante
+      setDoc(doc(db, 'bikes', bikeNumber), {
+        status: targetStatus, responsavel: driverName, ultimaAtualizacao: serverTimestamp()
+      }, { merge: true }).catch(e => console.warn('[Firebase] bikes write:', e.code));
 
-      // Log no Firestore
-      await addDoc(collection(db, 'reports'), {
-        driverName,
-        bikeNumber,
-        status: targetStatus,
+      addDoc(collection(db, 'reports'), {
+        driverName, bikeNumber, status: targetStatus,
         timestamp: serverTimestamp(),
         observation: `Inserida em ${targetStatus} via consulta`
-      });
+      }).catch(e => console.warn('[Firebase] reports write:', e.code));
 
-      // Atualiza Sheets
-      await apiCall({
-        action: 'insertBikeMechanics',
-        driverName,
-        bikeNumber,
-        targetStatus
-      }, 1, true);
+      // Sheets — fonte de verdade
+      await apiCall({ action: 'insertBikeMechanics', driverName, bikeNumber, targetStatus }, 1, true);
 
       setSuccessMessage(`Bicicleta ${bikeNumber} inserida em ${targetStatus}!`);
       setSearchedBike(null);
@@ -1380,11 +1368,11 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const handleUpdateDriverState = async (targetDriver: string, route: string[], collected: string[]) => {
     setIsLoading(true);
     try {
-      await setDoc(doc(db, 'users', targetDriver), { routeBikes: route, collectedBikes: collected, lastUpdate: serverTimestamp(), sheetsSync: false }, { merge: true });
-      await Promise.all([
-        ...route.map(id => setDoc(doc(db, 'bikes', id), { status: 'Em Rota', responsavel: targetDriver, ultimaAtualizacao: serverTimestamp() }, { merge: true })),
-        ...collected.map(id => setDoc(doc(db, 'bikes', id), { status: 'Recolhida', responsavel: targetDriver, ultimaAtualizacao: serverTimestamp() }, { merge: true })),
-      ]);
+      // Firebase não-bloqueante
+      setDoc(doc(db, 'users', targetDriver), { routeBikes: route, collectedBikes: collected, lastUpdate: serverTimestamp(), sheetsSync: false }, { merge: true }).catch(e => console.warn('[Firebase] users write:', e.code));
+      route.forEach(id => setDoc(doc(db, 'bikes', id), { status: 'Em Rota', responsavel: targetDriver, ultimaAtualizacao: serverTimestamp() }, { merge: true }).catch(() => {}));
+      collected.forEach(id => setDoc(doc(db, 'bikes', id), { status: 'Recolhida', responsavel: targetDriver, ultimaAtualizacao: serverTimestamp() }, { merge: true }).catch(() => {}));
+      // Sheets — fonte de verdade
       const result = await apiCall({ action: 'updateDriverState', driverName: targetDriver, routeBikes: route, collectedBikes: collected });
       if (result.success) { alert(`Estado de ${targetDriver} atualizado!`); refreshAll(true); setIsEditDriverModalOpen(false); }
       else throw new Error(result.error);
