@@ -464,10 +464,10 @@ const MainScreen: React.FC<MainScreenProps> = ({
   useEffect(() => {
     if (!driverName) return;
 
-    // Pedidos pendentes
+    // Pedidos pendentes — Firebase complementa o Sheets, não substitui
     const qRequests = query(collection(db, 'requests'));
     const unsubRequests = onSnapshot(qRequests, (snapshot) => {
-      const updated: any[] = [];
+      const firebaseRequests: any[] = [];
       let hasNew = false;
       snapshot.docChanges().forEach(change => {
         if (change.type === 'added') {
@@ -478,13 +478,23 @@ const MainScreen: React.FC<MainScreenProps> = ({
       snapshot.forEach(doc => {
         const d = doc.data();
         const status = (d.status || d.situacao || '').toString().toLowerCase().trim();
-        // Só inclui se for explicitamente pendente
         const isPending = !status || status === 'pendente';
         if (isPending && (d.recipient === driverName || d.recipient === 'Todos')) {
-          updated.push({ id: doc.id, ...d });
+          firebaseRequests.push({ id: doc.id, ...d });
         }
       });
-      setPendingRequests(updated);
+      // Só atualiza se Firebase trouxe requests — não limpa requests do Sheets
+      if (firebaseRequests.length > 0) {
+        setPendingRequests(prev => {
+          // Mescla: mantém requests do Sheets (id numérico) + adiciona do Firebase
+          const sheetsReqs = prev.filter(r => !isNaN(Number(r.id)));
+          const merged = [...sheetsReqs];
+          firebaseRequests.forEach(fr => {
+            if (!merged.find(r => String(r.id) === String(fr.id))) merged.push(fr);
+          });
+          return merged;
+        });
+      }
       if (hasNew) showNotification('Novo Pedido', 'Você tem uma nova solicitação pendente.');
     }, err => console.error('Listener requests:', err));
 
@@ -1530,14 +1540,24 @@ const MainScreen: React.FC<MainScreenProps> = ({
 
     const applyData = (d: any) => {
       if (d.requests) {
-        const pendingOnly = d.requests.filter((r: any) => {
+        const sheetsRequests = d.requests.filter((r: any) => {
           if (processedRequestIds.current.has(String(r.id))) return false;
           const status = (r.status || r.situacao || '').toString().toLowerCase().trim();
           return !status || status === 'pendente';
         });
-        setPendingRequests(pendingOnly);
-        // Sheets é fonte de verdade — sincroniza Firebase removendo o que não existe mais
-        syncRequestsToFirebase(d.requests);
+        setPendingRequests(prev => {
+          // Mantém requests do Firebase (id alfanumérico) que não estão no Sheets ainda
+          const firebaseOnly = prev.filter(r => {
+            const id = String(r.id);
+            const isFirestoreId = id.length > 10 && isNaN(Number(id));
+            if (!isFirestoreId) return false;
+            if (processedRequestIds.current.has(id)) return false;
+            // Mantém se não foi encontrado nos requests do Sheets
+            return !sheetsRequests.find((sr: any) => String(sr.id) === id);
+          });
+          return [...firebaseOnly, ...sheetsRequests];
+        });
+        // Não sincroniza/deleta do Firebase durante applyData para evitar loop
       }
       if (d.driverState && !isUpdatingStateRef.current && canSheetsOverride()) {
         applyStateFromSheets(
