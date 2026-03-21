@@ -201,10 +201,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const [isAdminAlertsOpen, setIsAdminAlertsOpen] = useState(false);
   const [adminNotification, setAdminNotification] = useState<any>(null);
   const [isForceReloading, setIsForceReloading] = useState(false);
-  const [isAuditLogOpen, setIsAuditLogOpen] = useState(false);
-  const [auditLogData, setAuditLogData] = useState<any[]>([]);
-  const [auditLogLoading, setAuditLogLoading] = useState(false);
-  const [auditLogFilter, setAuditLogFilter] = useState('');
   const [isReporModalOpen, setIsReporModalOpen] = useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
   const [isEditDriverModalOpen, setIsEditDriverModalOpen] = useState(false);
@@ -316,7 +312,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const normalizedCategory = category.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   const isAdm = normalizedCategory.includes('ADM');
   const isMecanica = normalizedCategory.includes('MECANICA') || normalizedCategory.includes('MECANICO');
-  const isDiego = isAdm && driverName.toLowerCase().includes('diego');
 
   // =================================================================
   // HELPERS DE ESTADO
@@ -607,15 +602,15 @@ const MainScreen: React.FC<MainScreenProps> = ({
           });
         });
 
-        // Mescla com Sheets: Firebase tem prioridade (mais recente),
-        // mas mantém motoristas que só estão no Sheets
-        setDriverLocations(prev => {
-          const merged = [...firebaseLocations];
-          const firebaseNames = new Set(firebaseLocations.map(l => l.driverName));
-          // Adiciona do Sheets quem não está no Firebase
-          prev.filter(l => !firebaseNames.has(l.driverName)).forEach(l => merged.push({ ...l, stale: true }));
-          return merged;
-        });
+        // Só atualiza se Firebase trouxe dados — senão mantém o que está (do Sheets)
+        if (firebaseLocations.length > 0) {
+          setDriverLocations(prev => {
+            // Firebase atualiza posições existentes; Sheets preenche quem não está no Firebase
+            const firebaseNames = new Set(firebaseLocations.map((l: any) => l.driverName));
+            const sheetsOnly = prev.filter(l => !firebaseNames.has(l.driverName));
+            return [...firebaseLocations, ...sheetsOnly.map(l => ({ ...l, stale: true }))];
+          });
+        }
       }, err => console.error('Listener locations:', err));
     }
 
@@ -1322,16 +1317,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
     } finally { setIsLoading(false); }
   };
 
-  const fetchAuditLog = async () => {
-    setAuditLogLoading(true);
-    try {
-      const r = await apiCall({ action: 'getAuditLog', limit: 200 }, 1, true);
-      if (r.success) setAuditLogData(r.data || []);
-      else setError('Erro ao carregar log: ' + r.error);
-    } catch (e: any) { setError('Erro: ' + e.message); }
-    finally { setAuditLogLoading(false); }
-  };
-
   const handleForceReload = async () => {
     if (!confirm('Forçar atualização em TODOS os usuários conectados?\nEles serão redirecionados automaticamente em 1-2 segundos.')) return;
     setIsForceReloading(true);
@@ -1651,11 +1636,16 @@ const MainScreen: React.FC<MainScreenProps> = ({
       if (d.schedule) setUserSchedule(d.schedule);
       if (d.motoristas) setMotoristas(d.motoristas);
       if (d.driverLocations) {
-        // Mescla Sheets com Firebase — Firebase tem prioridade para quem já enviou posição
+        // Sheets serve como base; Firebase atualiza em cima via listener
         setDriverLocations(prev => {
-          const fbNames = new Set(prev.filter((l:any) => l.source === 'firebase').map((l:any) => l.driverName));
-          const sheetsOnly = (d.driverLocations as any[]).filter((l:any) => !fbNames.has(l.driverName));
           const fbLocations = prev.filter((l:any) => l.source === 'firebase');
+          if (fbLocations.length === 0) {
+            // Sem dados Firebase ainda — usa Sheets direto
+            return d.driverLocations;
+          }
+          // Mescla: Firebase tem prioridade, Sheets complementa quem não tem Firebase
+          const fbNames = new Set(fbLocations.map((l:any) => l.driverName));
+          const sheetsOnly = (d.driverLocations as any[]).filter((l:any) => !fbNames.has(l.driverName));
           return [...fbLocations, ...sheetsOnly.map((l:any) => ({ ...l, stale: true }))];
         });
       }
@@ -1742,11 +1732,16 @@ const MainScreen: React.FC<MainScreenProps> = ({
       if (d.schedule) setUserSchedule(d.schedule);
       if (d.motoristas) setMotoristas(d.motoristas);
       if (d.driverLocations) {
-        // Mescla Sheets com Firebase — Firebase tem prioridade para quem já enviou posição
+        // Sheets serve como base; Firebase atualiza em cima via listener
         setDriverLocations(prev => {
-          const fbNames = new Set(prev.filter((l:any) => l.source === 'firebase').map((l:any) => l.driverName));
-          const sheetsOnly = (d.driverLocations as any[]).filter((l:any) => !fbNames.has(l.driverName));
           const fbLocations = prev.filter((l:any) => l.source === 'firebase');
+          if (fbLocations.length === 0) {
+            // Sem dados Firebase ainda — usa Sheets direto
+            return d.driverLocations;
+          }
+          // Mescla: Firebase tem prioridade, Sheets complementa quem não tem Firebase
+          const fbNames = new Set(fbLocations.map((l:any) => l.driverName));
+          const sheetsOnly = (d.driverLocations as any[]).filter((l:any) => !fbNames.has(l.driverName));
           return [...fbLocations, ...sheetsOnly.map((l:any) => ({ ...l, stale: true }))];
         });
       }
@@ -2156,19 +2151,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
                   <polyline points="23 4 23 10 17 10"/>
                   <polyline points="1 20 1 14 7 14"/>
                   <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-                </svg>
-              </button>
-            )}
-            {isDiego && (
-              <button onClick={() => { setIsAuditLogOpen(true); fetchAuditLog(); }}
-                title="Log de Auditoria"
-                className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-purple-50 hover:text-purple-600">
-                <svg viewBox="0 0 24 24" className="w-6 h-6 sm:w-7 sm:h-7" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                  <polyline points="14 2 14 8 20 8"/>
-                  <line x1="16" y1="13" x2="8" y2="13"/>
-                  <line x1="16" y1="17" x2="8" y2="17"/>
-                  <polyline points="10 9 9 9 8 9"/>
                 </svg>
               </button>
             )}
@@ -3316,95 +3298,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
               <p className="text-center text-[8px] text-gray-400 mt-1.5 uppercase tracking-widest font-bold">
                 Máximo 20 bikes · Raio 3km
               </p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Modal Audit Log — apenas Diego */}
-      {isAuditLogOpen && isDiego && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3" onClick={() => setIsAuditLogOpen(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh]" onClick={e => e.stopPropagation()}>
-            {/* Header */}
-            <div className="p-4 border-b flex items-center justify-between bg-purple-50 rounded-t-2xl">
-              <div>
-                <h2 className="text-base font-black text-purple-800 flex items-center gap-2">
-                  <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-                  Log de Auditoria
-                </h2>
-                <p className="text-[10px] text-purple-500 mt-0.5">{auditLogData.length} registros · Apenas você pode ver isso</p>
-              </div>
-              <div className="flex items-center gap-2">
-                <button onClick={fetchAuditLog} disabled={auditLogLoading}
-                  className="p-1.5 text-purple-400 hover:text-purple-600 rounded-full hover:bg-purple-100">
-                  <svg viewBox="0 0 24 24" className={`w-4 h-4 ${auditLogLoading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
-                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-                  </svg>
-                </button>
-                <button onClick={() => setIsAuditLogOpen(false)} className="p-1.5 text-gray-400 hover:text-gray-700"><XIcon className="w-5 h-5"/></button>
-              </div>
-            </div>
-
-            {/* Filtro */}
-            <div className="px-4 py-2 border-b bg-gray-50">
-              <input
-                type="text"
-                value={auditLogFilter}
-                onChange={e => setAuditLogFilter(e.target.value)}
-                placeholder="Filtrar por bike, responsável, ação..."
-                className="w-full text-xs p-1.5 border border-gray-200 rounded-lg focus:ring-purple-400 focus:border-purple-400"
-              />
-            </div>
-
-            {/* Lista */}
-            <div className="flex-1 overflow-y-auto p-3 space-y-2">
-              {auditLogLoading ? (
-                <div className="text-center py-8 text-gray-400 text-xs animate-pulse">Carregando registros...</div>
-              ) : auditLogData.filter(r =>
-                  !auditLogFilter ||
-                  r.bikes?.toLowerCase().includes(auditLogFilter.toLowerCase()) ||
-                  r.actor?.toLowerCase().includes(auditLogFilter.toLowerCase()) ||
-                  r.action?.toLowerCase().includes(auditLogFilter.toLowerCase()) ||
-                  r.details?.toLowerCase().includes(auditLogFilter.toLowerCase())
-                ).length === 0 ? (
-                <div className="text-center py-8 text-gray-400 text-xs italic">Nenhum registro encontrado.</div>
-              ) : auditLogData.filter(r =>
-                  !auditLogFilter ||
-                  r.bikes?.toLowerCase().includes(auditLogFilter.toLowerCase()) ||
-                  r.actor?.toLowerCase().includes(auditLogFilter.toLowerCase()) ||
-                  r.action?.toLowerCase().includes(auditLogFilter.toLowerCase()) ||
-                  r.details?.toLowerCase().includes(auditLogFilter.toLowerCase())
-                ).map((record, i) => {
-                  const isDelete = record.action?.toLowerCase().includes('removid') || record.action?.toLowerCase().includes('cancelad') || record.action?.toLowerCase().includes('duplicata');
-                  const isMove = record.action?.toLowerCase().includes('posse') || record.action?.toLowerCase().includes('roteiro') || record.action?.toLowerCase().includes('carretinha');
-                  const dotColor = isDelete ? 'bg-red-500' : isMove ? 'bg-blue-500' : 'bg-gray-400';
-                  const badgeColor = isDelete ? 'bg-red-50 text-red-700 border-red-200' : isMove ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-gray-50 text-gray-600 border-gray-200';
-                  return (
-                    <div key={i} className="bg-white border rounded-lg p-2.5 shadow-sm flex items-start gap-2.5">
-                      <div className={`w-2 h-2 rounded-full mt-1.5 flex-shrink-0 ${dotColor}`}/>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
-                          <span className={`px-1.5 py-0.5 text-[9px] font-black rounded border ${badgeColor}`}>{record.action}</span>
-                          <span className="text-[9px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded border border-gray-200">{record.origin}</span>
-                        </div>
-                        {record.bikes && (
-                          <div className="flex flex-wrap gap-1 my-1">
-                            {record.bikes.split(',').map((b: string) => b.trim()).filter(Boolean).map((b: string) => (
-                              <span key={b} className="px-1.5 py-0.5 bg-purple-50 text-purple-700 border border-purple-200 rounded text-[9px] font-mono font-bold">{b}</span>
-                            ))}
-                          </div>
-                        )}
-                        <div className="flex items-center gap-2 mt-0.5">
-                          <span className="text-[9px] font-semibold text-gray-700">👤 {record.actor}</span>
-                          {record.details && <span className="text-[9px] text-gray-400 truncate">· {record.details}</span>}
-                        </div>
-                      </div>
-                      <span className="text-[8px] text-gray-400 font-mono flex-shrink-0 text-right leading-tight">{record.timestamp}</span>
-                    </div>
-                  );
-                })
-              }
             </div>
           </div>
         </div>
