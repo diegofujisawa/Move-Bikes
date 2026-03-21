@@ -200,6 +200,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
   const [isAdminAlertsOpen, setIsAdminAlertsOpen] = useState(false);
   const [adminNotification, setAdminNotification] = useState<any>(null);
+  const [isForceReloading, setIsForceReloading] = useState(false);
   const [isReporModalOpen, setIsReporModalOpen] = useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
   const [isEditDriverModalOpen, setIsEditDriverModalOpen] = useState(false);
@@ -508,6 +509,27 @@ const MainScreen: React.FC<MainScreenProps> = ({
       setCollectedBikes(data.collectedBikes || []);
     }, err => console.error('Listener usuário:', err));
 
+    // Listener de force_reload — ADM pode forçar atualização de todos os usuários
+    const qReload = query(
+      collection(db, 'notifications'),
+      where('type', '==', 'force_reload')
+    );
+    const unsubReload = onSnapshot(qReload, snapshot => {
+      if (isAdm) return; // ADM não recarrega
+      snapshot.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const data = change.doc.data();
+          const ts = data.timestamp?.toDate?.()?.getTime() || 0;
+          const now = Date.now();
+          // Só recarrega se a notificação foi criada nos últimos 10 segundos
+          if (now - ts < 10000) {
+            console.log('[ForceReload] Recarregando por comando do ADM...');
+            setTimeout(() => window.location.reload(), 1500);
+          }
+        }
+      });
+    }, err => console.error('Listener force_reload:', err));
+
     // Alertas (ADM)
     let unsubAlerts = () => {};
     let unsubNotifications = () => {};
@@ -559,7 +581,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
       }, err => console.error('Listener timeline:', err));
     }
 
-    return () => { unsubRequests(); unsubAlerts(); unsubUser(); unsubNotifications(); unsubTimeline(); };
+    return () => { unsubRequests(); unsubAlerts(); unsubUser(); unsubNotifications(); unsubTimeline(); unsubReload(); };
   }, [driverName, isAdm]);
 
   // =================================================================
@@ -1258,6 +1280,24 @@ const MainScreen: React.FC<MainScreenProps> = ({
     } finally { setIsLoading(false); }
   };
 
+  const handleForceReload = async () => {
+    if (!confirm('Forçar atualização em TODOS os usuários conectados?\nEles serão redirecionados automaticamente em 1-2 segundos.')) return;
+    setIsForceReloading(true);
+    try {
+      await addDoc(collection(db, 'notifications'), {
+        type: 'force_reload',
+        sentBy: driverName,
+        timestamp: serverTimestamp(),
+        message: 'Atualização forçada pelo ADM'
+      });
+      setSuccessMessage('✅ Comando enviado! Todos os usuários serão atualizados.');
+    } catch (e: any) {
+      setError('Erro ao enviar comando: ' + e.message);
+    } finally {
+      setIsForceReloading(false);
+    }
+  };
+
   const handleFinalizeTrailer = async (trailerName: string) => {
     if (!window.confirm(`Finalizar a carretinha "${trailerName}"? Os ADMs serão notificados para alterar o status das bikes.`)) return;
     setIsLoading(true);
@@ -1887,6 +1927,16 @@ const MainScreen: React.FC<MainScreenProps> = ({
               {alertCount > 0 && <span className="absolute top-0 right-0 bg-red-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full border-2 border-white">{alertCount}</span>}
             </button>
             {isAdm && <button onClick={onShowMap} disabled={isLoading} title="Mapa" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 disabled:opacity-50"><MapIcon className="w-6 h-6 sm:w-7 sm:h-7"/></button>}
+            {isAdm && (
+              <button onClick={handleForceReload} disabled={isForceReloading} title="Forçar atualização em todos os usuários"
+                className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-orange-50 hover:text-orange-600 disabled:opacity-50 relative">
+                <svg viewBox="0 0 24 24" className={`w-6 h-6 sm:w-7 sm:h-7 ${isForceReloading ? 'animate-spin text-orange-500' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="23 4 23 10 17 10"/>
+                  <polyline points="1 20 1 14 7 14"/>
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                </svg>
+              </button>
+            )}
             {normalizedCategory.includes('MOTORISTA') && <>
               <button onClick={() => setIsVehicleModalOpen(true)} disabled={isLoading} title="Trocar Veículo" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 disabled:opacity-50"><SwitchIcon className="w-6 h-6 sm:w-7 sm:h-7"/></button>
               <button onClick={() => { fetchSchedule(); setIsScheduleModalOpen(true); }} disabled={isLoading} title="Escala" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 disabled:opacity-50"><CalendarIcon className="w-6 h-6 sm:w-7 sm:h-7"/></button>
