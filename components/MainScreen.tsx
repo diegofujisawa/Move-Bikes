@@ -214,7 +214,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
 
   // --- Dados ADM ---
   const [driversSummary, setDriversSummary] = useState<any[]>([]);
-  const [firebaseTimelineEvents, setFirebaseTimelineEvents] = useState<Record<string, Array<{tsMs: number, type: string}>>>({});
+  const [firebaseTimelineEvents, setFirebaseTimelineEvents] = useState<Record<string, Array<{tsMs: number, type: string, bikeNumber?: string}>>>({});
   const [timelineModal, setTimelineModal] = useState<{driver: string, events: any[], startMs: number, endMs: number} | null>(null);
   const [summaryTimeRange, setSummaryTimeRange] = useState<'day' | 'week' | 'month' | '-1' | '-7'>('day');
   const [isSummaryLoading, setIsSummaryLoading] = useState(false);
@@ -553,7 +553,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
           if (!driver) return;
           const ts = data.timestamp?.toDate?.() || new Date();
           if (!byDriver[driver]) byDriver[driver] = [];
-          byDriver[driver].push({ tsMs: ts.getTime(), type: data.type || 'recolhida' });
+          byDriver[driver].push({ tsMs: ts.getTime(), type: data.type || 'recolhida', bikeNumber: data.bikeNumber || '' });
         });
         setFirebaseTimelineEvents(byDriver);
       }, err => console.error('Listener timeline:', err));
