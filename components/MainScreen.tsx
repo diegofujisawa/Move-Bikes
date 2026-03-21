@@ -31,7 +31,6 @@ import DestinationModal from './DestinationModal';
 import HistoryModal from './HistoryModal';
 import VehicleSwitchModal from './VehicleSwitchModal';
 import EditDriverModal from './EditDriverModal';
-import AdminAlerts from './AdminAlerts';
 import { apiCall, apiGetCall } from '../api';
 import { User } from '../types';
 import { migrateDataToFirebase } from '../migrationService';
@@ -146,7 +145,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const [isReportModalOpen, setReportModalOpen] = useState(false);
   const [isVehicleModalOpen, setIsVehicleModalOpen] = useState(false);
   const [isScheduleModalOpen, setIsScheduleModalOpen] = useState(false);
-  const [isAdminAlertsOpen, setIsAdminAlertsOpen] = useState(false);
   const [adminNotification, setAdminNotification] = useState<any>(null);
   const [isReporModalOpen, setIsReporModalOpen] = useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
@@ -177,8 +175,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const [isVandalizedLoading, setIsVandalizedLoading] = useState(false);
   const [changeStatusData, setChangeStatusData] = useState<{ vandalizadas: any[], filial: any[] }>({ vandalizadas: [], filial: [] });
   const [statusTimeRange, setStatusTimeRange] = useState<'24h' | '48h' | '72h' | 'week'>('24h');
-  const [alertCount, setAlertCount] = useState(0);
-  const [hasNewAlerts, setHasNewAlerts] = useState(false);
 
   // --- Route Generation ---
   const [isRouteConfigOpen, setIsRouteConfigOpen] = useState(false);
@@ -201,7 +197,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
     oeste:   { lat: -23.5433, lng: -46.7333, label: 'ZONA OESTE' },
     central: { lat: -23.5433, lng: -46.6333, label: 'ZONA CENTRAL' }
   }), []);
-  const [lastViewedAlertCount, setLastViewedAlertCount] = useState(0);
   const [editingDriver, setEditingDriver] = useState<any>(null);
 
   // --- Dados auxiliares ---
@@ -463,7 +458,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
         const updated: any[] = [];
         snapshot.forEach(doc => updated.push({ id: doc.id, ...doc.data() }));
         setAlerts(updated);
-        setAlertCount(updated.length);
       }, err => console.error('Listener alertas:', err));
 
       // Listener de notificações de carretinha finalizada
@@ -1541,11 +1535,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
         if (d.alerts) setAlerts(d.alerts);
         if (d.vandalized) setVandalizedBikes(d.vandalized);
         if (d.changeStatusData) setChangeStatusData(d.changeStatusData);
-        if (d.adminAlerts) {
-          const n = d.adminAlerts.length;
-          setAlertCount(n);
-          if (n > lastViewedAlertCount) setHasNewAlerts(true);
-        }
       }
     };
 
@@ -1568,7 +1557,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
       setIsSyncing(false);
       if (isAdm) { setIsSummaryLoading(false); setIsAlertsLoading(false); setIsVandalizedLoading(false); }
     }
-  }, [driverName, category, summaryTimeRange, statusTimeRange, applyStateFromSheets, isAdm, lastViewedAlertCount]);
+  }, [driverName, category, summaryTimeRange, statusTimeRange, applyStateFromSheets, isAdm]);
 
   // Cache inicial
   useEffect(() => {
@@ -1817,11 +1806,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
             <button onClick={() => setRequestModalOpen(true)} disabled={isLoading} title="Nova Solicitação" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 disabled:opacity-50"><PlusIcon className="w-6 h-6 sm:w-7 sm:h-7"/></button>
             <button onClick={() => setRouteModalOpen(true)} disabled={isLoading} title="Criar Roteiro" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 disabled:opacity-50"><PlusPlusIcon className="w-6 h-6 sm:w-7 sm:h-7"/></button>
             <button onClick={() => setTrailerModalOpen(true)} disabled={isLoading} title="Carretinha" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 disabled:opacity-50"><TrailerIcon className="w-6 h-6 sm:w-7 sm:h-7"/></button>
-            <button onClick={() => { setIsAdminAlertsOpen(true); setHasNewAlerts(false); setAlertCount(0); setLastViewedAlertCount(alertCount); }} disabled={isLoading} title="Alertas"
-              className={`p-1.5 sm:p-2 rounded-full relative disabled:opacity-50 ${hasNewAlerts && alertCount > 0 ? 'text-red-600 bg-red-50 animate-pulse' : 'text-gray-500 hover:bg-gray-100 hover:text-red-600'}`}>
-              <AlertTriangleIcon className={`w-6 h-6 sm:w-7 sm:h-7 ${hasNewAlerts && alertCount > 0 ? 'animate-bounce' : ''}`}/>
-              {alertCount > 0 && <span className="absolute top-0 right-0 bg-red-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full border-2 border-white">{alertCount}</span>}
-            </button>
             {isAdm && <button onClick={onShowMap} disabled={isLoading} title="Mapa" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 disabled:opacity-50"><MapIcon className="w-6 h-6 sm:w-7 sm:h-7"/></button>}
             {normalizedCategory.includes('MOTORISTA') && <>
               <button onClick={() => setIsVehicleModalOpen(true)} disabled={isLoading} title="Trocar Veículo" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 disabled:opacity-50"><SwitchIcon className="w-6 h-6 sm:w-7 sm:h-7"/></button>
@@ -3079,7 +3063,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
       <HistoryModal isOpen={isHistoryModalOpen} onClose={() => setIsHistoryModalOpen(false)} history={requestsHistory} isLoading={isHistoryLoading} driverName={driverName}/>
       <ScheduleModal isOpen={isScheduleModalOpen} onClose={() => setIsScheduleModalOpen(false)} schedule={userSchedule} driverName={driverName} isLoading={isScheduleLoading}/>
       <VehicleSwitchModal isOpen={isVehicleModalOpen} onClose={() => setIsVehicleModalOpen(false)} onSwitch={(p, km) => onUpdateUser({ plate: p, kmInicial: km })} driverName={driverName}/>
-      <AdminAlerts isOpen={isAdminAlertsOpen} onClose={() => setIsAdminAlertsOpen(false)} adminName={driverName}/>
       <ReporModal isOpen={isReporModalOpen} onClose={() => setIsReporModalOpen(false)} data={reporData} isLoading={isReporLoading}/>
       <MechanicRepairModal isOpen={isMechanicRepairModalOpen} onClose={() => setIsMechanicRepairModalOpen(false)} onConfirm={handleFinalizeMechanicsRepair} isLoading={isLoading} bikeNumber={selectedMechanicBike?.patrimonio || ''}/>
       <MechanicSelectionModal isOpen={isMechanicSelectionModalOpen} onClose={() => setIsMechanicSelectionModalOpen(false)} onConfirm={handleMechanicSelectionConfirm} isLoading={isLoading} bikeNumber={selectedMechanicBike?.patrimonio || ''}/>

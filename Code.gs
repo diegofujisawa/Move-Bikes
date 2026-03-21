@@ -38,8 +38,6 @@ const ALERTS_SHEET_NAME        = 'Alertas';
 const VANDALIZED_SHEET_NAME    = 'Vandalizadas';
 const OCORRENCIA_SHEET_NAME    = 'Ocorrencia';
 const VANDALISMO_SHEET_NAME    = 'Vandalismo';
-const DIVERGENCE_SHEET_NAME    = 'Divergencia';
-const NOTIFICATIONS_SHEET_NAME = 'Notificacoes';
 const DAILY_SUMMARY_SHEET_NAME = 'ResumoDiario';
 const MECHANICS_SHEET_NAME     = 'Mecanica';
 const QUEUE_SHEET_NAME         = 'FilaProcessamento';
@@ -75,8 +73,6 @@ const COLUMN_INDICES = {
     STATUS_SISTEMA: 6, BATERIA: 7, TRAVA: 8, LOCALIDADE: 9
   },
   STATE: { MOTORISTA: 1, ROTEIRO: 3, RECOLHIDAS: 4 },
-  DIVERGENCE: { TIMESTAMP: 1, MOTORISTA: 2, PATRIMONIO: 3, MENSAGEM: 4 },
-  NOTIFICATIONS: { USUARIO: 1, JSON: 2 },
   DAILY_SUMMARY: {
     DATA: 1, MOTORISTA: 2, PLACA: 3, KM_TOTAL: 4, BATERIA: 5, MANUT_BIKE: 6,
     MANUT_LOCKER: 7, REMANEJADAS: 8, OCORRENCIAS: 9, NAO_ENCONTRADAS: 10,
@@ -316,12 +312,11 @@ function doPost(e) {
       case 'generateDriverRoute':   response = { ...generateDriverRoute(request.driverName, request.location, request.filters, request.maxBikes, request.rangeKm), version: BACKEND_VERSION }; break;
       case 'exportAllData':         response = { ...handleExportAllData(request), version: BACKEND_VERSION }; break;
       case 'saveDailySummary':      response = { ...saveDailySummary(request.summaryData), version: BACKEND_VERSION }; break;
-      case 'getAdminAlerts':        response = { ...getAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
-      case 'clearAdminAlerts':      response = { ...clearAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
+      case 'getAdminAlerts':        response = { success: true, alerts: [], version: BACKEND_VERSION }; break;
+      case 'clearAdminAlerts':      response = { success: true, version: BACKEND_VERSION }; break;
       case 'getBikeMovement':       response = { ...getBikeMovement(request.bikeNumber, request.limit), version: BACKEND_VERSION }; break;
       case 'confirmMechanicsReceipt': response = { ...confirmMechanicsReceipt(request.bikeNumber, request.mechanicName), version: BACKEND_VERSION }; break;
       case 'insertBikeMechanics':   response = { ...insertBikeMechanics(request.bikeNumber, request.driverName, request.targetStatus), version: BACKEND_VERSION }; break;
-      case 'notifyAdmins':          response = { ...notifyAdmins(request.message, request.bikes, request.trailerName), version: BACKEND_VERSION }; break;
       case 'finalizeMechanicsRepair': response = { ...finalizeMechanicsRepair(request.bikeNumber, request.mechanicName, request.treatment), version: BACKEND_VERSION }; break;
       case 'organizeTrailer':       response = { ...organizeTrailer(request.bikeNumbers, request.trailerName), version: BACKEND_VERSION }; break;
       case 'finalizeTrailer':       response = { ...finalizeTrailer(request.trailerName), version: BACKEND_VERSION }; break;
@@ -536,7 +531,6 @@ function handleSync(request) {
       response.data.changeStatusData = getChangeStatusData(statusTimeRange, {
         report: getSheet(REPORT_SHEET_NAME), bikes: getSheet(BIKES_SHEET_NAME)
       }).data || { vandalizadas: [], filial: [] };
-      response.data.adminAlerts = getAdminAlerts(driverName).alerts || [];
     } else {
       response.data.driversSummary = getDriversSummary(summaryTimeRange, {
         access: getSheet(ACCESS_SHEET_NAME), report: getSheet(REPORT_SHEET_NAME),
@@ -984,7 +978,6 @@ function logReport(rowData, kmFinal, plate) {
 // =================================================================
 function runPeriodicMaintenance() {
   try { cleanupRecentDuplicates(); } catch (e) { console.error('cleanupDuplicates:', e); }
-  try { checkAllDivergences(); } catch (e) { console.error('checkDivergences:', e); }
 }
 
 // =================================================================
@@ -1832,212 +1825,6 @@ function syncWithRequests(patrimonio, status, observacao, motorista) {
 }
 
 // =================================================================
-// --- NOTIFICAÇÕES E DIVERGÊNCIAS ---
-// (checkDivergences movido para Trigger periódico via runPeriodicMaintenance)
-// =================================================================
-function checkAllDivergences() {
-  const reportSheet = getSpreadsheet().getSheetByName(REPORT_SHEET_NAME);
-  if (!reportSheet) return;
-  const lastRow = reportSheet.getLastRow();
-  if (lastRow < 2) return;
-
-  // Processa apenas os últimos registros — evita reprocessar histórico inteiro
-  const numRows = Math.min(lastRow - 1, 100);
-  const data = reportSheet.getRange(lastRow - numRows + 1, 1, numRows, reportSheet.getLastColumn()).getValues();
-  const now = new Date();
-  
-  data.forEach(row => {
-    try {
-      const ts = parseTimestamp(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
-      if (!ts) return;
-      
-      // Regra: Somente ocorrências do dia
-      const isToday = ts.getFullYear() === now.getFullYear() &&
-                      ts.getMonth() === now.getMonth() &&
-                      ts.getDate() === now.getDate();
-      if (!isToday) return;
-      
-      checkDivergences(row, ts);
-    } catch (e) {}
-  });
-}
-
-function checkDivergences(rowData, timestamp) {
-  const patrimonio  = rowData[COLUMN_INDICES.REPORTS.PATRIMONIO - 1];
-  const status      = (rowData[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim();
-  const observacao  = (rowData[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim();
-  const motorista   = (rowData[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
-  const statusSist  = (rowData[COLUMN_INDICES.REPORTS.STATUS_SISTEMA - 1] || '').toString().trim();
-  const bateriaRaw  = rowData[COLUMN_INDICES.REPORTS.BATERIA - 1];
-  const bVal = parseFloat(String(bateriaRaw).replace('%', '').replace(',', '.')) || 0;
-  const bateria = bVal <= 1 ? Math.round(bVal * 100) : Math.round(bVal);
-  const localidade  = (rowData[COLUMN_INDICES.REPORTS.LOCALIDADE - 1] || '').toString().trim();
-
-  const statusLower = status.toLowerCase();
-  const obsLower = observacao.toLowerCase();
-  const statusSistLower = statusSist.toLowerCase();
-
-  // 1- Se no relatorio apontar bike recolhida, bateria baixa, mas a bateria estiver superior a 70%
-  if (statusLower.includes('recolhida') && obsLower.includes('bateria baixa') && bateria > 70) {
-    addDivergenceNotification(`Bike ${patrimonio}: Recolhida como Bateria Baixa, mas está com ${bateria}%.`, motorista, patrimonio, timestamp);
-  }
-
-  // 2- Se for colocado na estação bike com bateria abaixo de 50%
-  if (statusLower.includes('estação') && bateria < 50) {
-    addDivergenceNotification(`Bike ${patrimonio}: Colocada na Estação com bateria baixa (${bateria}%).`, motorista, patrimonio, timestamp);
-  }
-
-  // 3- Se For colocado na estação, mas a localização for diferente entre a coluna D (Observação) e a coluna I (Localidade)
-  if (statusLower.includes('estação') && observacao !== '' && localidade !== '' && observacao !== localidade) {
-    addDivergenceNotification(`Bike ${patrimonio}: Localização divergente (${observacao} vs ${localidade}).`, motorista, patrimonio, timestamp);
-  }
-
-  // 4- Se for colocado uma bike na estação com status diferente de "Ativo"
-  if (statusLower.includes('estação') && statusSistLower !== 'ativo' && statusSistLower !== '') {
-    addDivergenceNotification(`Bike ${patrimonio}: Colocada na Estação com status ${statusSist}.`, motorista, patrimonio, timestamp);
-  }
-}
-
-function addDivergenceNotification(messageBase, driverName, patrimonio, timestamp) {
-  logDivergence(driverName, patrimonio, messageBase, timestamp);
-  const accessSheet = getSpreadsheet().getSheetByName(ACCESS_SHEET_NAME);
-  if (!accessSheet) return;
-  const accessData = accessSheet.getDataRange().getValues();
-  const adms = accessData
-    .filter(row => normalizeCategory(row[COLUMN_INDICES.ACCESS.CATEGORIA - 1]).includes('ADM'))
-    .map(row => row[0]);
-  const notificationsMap = {};
-  adms.forEach(adm => { notificationsMap[adm] = `⚠️ DIVERGÊNCIA (${driverName}): ${messageBase}`; });
-  if (driverName) notificationsMap[driverName] = `⚠️ ATENÇÃO: Inconsistência na bike ${patrimonio}: ${messageBase}`;
-  batchAddNotifications(notificationsMap, timestamp);
-}
-
-function batchAddNotifications(notificationsMap, eventTimestamp) {
-  let sheet = getSpreadsheet().getSheetByName(NOTIFICATIONS_SHEET_NAME);
-  if (!sheet) {
-    sheet = getSpreadsheet().insertSheet(NOTIFICATIONS_SHEET_NAME);
-    sheet.appendRow(['Usuário', 'Notificações (JSON)']);
-    sheet.getRange(1, 1, 1, 2).setFontWeight('bold').setBackground('#f3f3f3');
-    sheet.setFrozenRows(1);
-  }
-  const data = sheet.getDataRange().getValues();
-  const userRows = {};
-  for (let i = 1; i < data.length; i++) userRows[data[i][0]] = i + 1;
-
-  const props = PropertiesService.getScriptProperties().getProperties();
-  const eventTime = eventTimestamp ? new Date(eventTimestamp).getTime() : 0;
-
-  Object.keys(notificationsMap).forEach(userName => {
-    const message = notificationsMap[userName];
-    const rowIndex = userRows[userName];
-    
-    // Verifica se o usuário limpou alertas após este evento
-    const lastClear = parseInt(props['lastClearAlert_' + userName] || '0');
-    if (eventTime > 0 && eventTime <= lastClear) return;
-
-    const notification = { msg: message, time: new Date().toISOString(), id: Utilities.getUuid(), eventTime: eventTime };
-    
-    if (!rowIndex) {
-      sheet.appendRow([userName, JSON.stringify([notification])]);
-    } else {
-      let current = [];
-      try { current = JSON.parse(sheet.getRange(rowIndex, COLUMN_INDICES.NOTIFICATIONS.JSON).getValue() || '[]'); } catch (e) {}
-      
-      // Evita duplicatas exatas do mesmo evento
-      const isDuplicate = current.some(n => n.msg === message && n.eventTime === eventTime);
-      if (!isDuplicate) {
-        current.unshift(notification);
-        if (current.length > 50) current = current.slice(0, 50);
-        sheet.getRange(rowIndex, COLUMN_INDICES.NOTIFICATIONS.JSON).setValue(JSON.stringify(current));
-      }
-    }
-  });
-  SpreadsheetApp.flush();
-}
-
-function logDivergence(driverName, patrimonio, message, eventTimestamp) {
-  let sheet = getSpreadsheet().getSheetByName(DIVERGENCE_SHEET_NAME);
-  if (!sheet) {
-    sheet = getSpreadsheet().insertSheet(DIVERGENCE_SHEET_NAME);
-    sheet.appendRow(['Data/Hora', 'Motorista', 'Patrimônio', 'Mensagem', 'Timestamp Evento']);
-    sheet.getRange(1, 1, 1, 5).setFontWeight('bold').setBackground('#f3f3f3');
-    sheet.setFrozenRows(1);
-  }
-
-  const eventTime = eventTimestamp ? new Date(eventTimestamp).getTime() : 0;
-  const lastRow = sheet.getLastRow();
-  if (lastRow > 1) {
-    const numCheck = Math.min(lastRow - 1, 100);
-    const data = sheet.getRange(lastRow - numCheck + 1, 1, numCheck, 5).getValues();
-    for (let i = data.length - 1; i >= 0; i--) {
-      if ((data[i][1] || '').toString() === driverName &&
-          (data[i][2] || '').toString() === patrimonio.toString() &&
-          (data[i][3] || '').toString() === message &&
-          (data[i][4] || 0).toString() === eventTime.toString()) {
-        return; // Já logado
-      }
-    }
-  }
-
-  sheet.appendRow([new Date(), driverName, patrimonio, message, eventTime]);
-}
-
-function getAdminAlerts(adminName) {
-  try {
-    const sheet = getSpreadsheet().getSheetByName(NOTIFICATIONS_SHEET_NAME);
-    if (!sheet) return { success: true, alerts: [] };
-    const data = sheet.getDataRange().getValues();
-    const adminLower = (adminName || '').toString().trim().toLowerCase();
-    for (let i = 1; i < data.length; i++) {
-      if ((data[i][0] || '').toString().trim().toLowerCase() === adminLower) {
-        try { return { success: true, alerts: JSON.parse(data[i][COLUMN_INDICES.NOTIFICATIONS.JSON - 1] || '[]') }; }
-        catch (e) { return { success: true, alerts: [] }; }
-      }
-    }
-    return { success: true, alerts: [] };
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
-}
-
-function clearAdminAlerts(adminName) {
-  try {
-    // 1. Limpa as notificações do usuário na aba Notificacoes
-    const sheet = getSpreadsheet().getSheetByName(NOTIFICATIONS_SHEET_NAME);
-    if (sheet) {
-      const data = sheet.getDataRange().getValues();
-      const adminLower = (adminName || '').toString().trim().toLowerCase();
-      for (let i = 1; i < data.length; i++) {
-        if ((data[i][0] || '').toString().trim().toLowerCase() === adminLower) {
-          sheet.getRange(i + 1, COLUMN_INDICES.NOTIFICATIONS.JSON).setValue('[]');
-          SpreadsheetApp.flush();
-          break;
-        }
-      }
-    }
-
-    // 2. Marca as divergências existentes como lidas
-    // Adiciona uma linha marcadora na aba Divergencia com timestamp de leitura
-    // O checkDivergences vai checar se há uma leitura mais recente que a divergência
-    let divSheet = getSpreadsheet().getSheetByName(DIVERGENCE_SHEET_NAME);
-    if (!divSheet) {
-      divSheet = getSpreadsheet().insertSheet(DIVERGENCE_SHEET_NAME);
-      divSheet.appendRow(['Data/Hora', 'Motorista', 'Patrimônio', 'Mensagem']);
-      divSheet.getRange(1, 1, 1, 4).setFontWeight('bold').setBackground('#f3f3f3');
-      divSheet.setFrozenRows(1);
-    }
-
-    // Registra timestamp de leitura — o logDivergence vai verificar isso
-    // antes de recriar divergências antigas
-    const propKey = 'lastClearAlert_' + (adminName || '').toString().trim();
-    PropertiesService.getScriptProperties().setProperty(propKey, new Date().toISOString());
-
-    return { success: true };
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
-}
-
 // =================================================================
 // --- RELATÓRIOS E RESUMOS ---
 // =================================================================
@@ -2934,17 +2721,6 @@ function getMechanicsList() {
   });
 
   return { success: true, data: Object.values(bikeMap) };
-}
-
-function notifyAdmins(message, bikes, trailerName) {
-  try {
-    const ss = getSpreadsheet();
-    const sheet = ss.getSheetByName(NOTIFICATIONS_SHEET_NAME) || ss.insertSheet(NOTIFICATIONS_SHEET_NAME);
-    sheet.appendRow([new Date(), 'ADM', 'trailer_finalizado', trailerName, message, (bikes || []).join(', '), 'pendente']);
-    return { success: true };
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
 }
 
 function insertBikeMechanics(bikeNumber, mechanicName, targetStatus) {
