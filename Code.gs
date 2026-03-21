@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '83.7-realtime-gps';
+const BACKEND_VERSION = '84.0-audit-log';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -43,6 +43,73 @@ const NOTIFICATIONS_SHEET_NAME = 'Notificacoes';
 const DAILY_SUMMARY_SHEET_NAME = 'ResumoDiario';
 const MECHANICS_SHEET_NAME     = 'Mecanica';
 const QUEUE_SHEET_NAME         = 'FilaProcessamento';
+const AUDIT_LOG_SHEET_NAME     = 'LogAuditoria';
+
+// =================================================================
+// --- AUDIT LOG ---
+// Registra toda remoção/modificação de bikes no app ou planilha
+// =================================================================
+function writeAuditLog(action, bikeNumbers, actor, details, origin) {
+  try {
+    const ss = getSpreadsheet();
+    let sheet = ss.getSheetByName(AUDIT_LOG_SHEET_NAME);
+    if (!sheet) {
+      sheet = ss.insertSheet(AUDIT_LOG_SHEET_NAME);
+      sheet.getRange(1, 1, 1, 7).setValues([[
+        'Data/Hora', 'Ação', 'Bikes', 'Responsável', 'Detalhes', 'Origem', 'Status'
+      ]]).setFontWeight('bold').setBackground('#f3f3f3');
+      sheet.setFrozenRows(1);
+      sheet.setColumnWidth(1, 150);
+      sheet.setColumnWidth(3, 200);
+      sheet.setColumnWidth(5, 300);
+    }
+    const bikes = Array.isArray(bikeNumbers) ? bikeNumbers.join(', ') : String(bikeNumbers || '');
+    sheet.appendRow([
+      new Date(),
+      action,
+      bikes,
+      actor || 'Sistema',
+      details || '',
+      origin || 'App',
+      'OK'
+    ]);
+  } catch (e) {
+    console.error('writeAuditLog erro:', e.message);
+  }
+}
+
+function getAuditLog(limit, filterActor, filterAction) {
+  try {
+    const ss = getSpreadsheet();
+    const sheet = ss.getSheetByName(AUDIT_LOG_SHEET_NAME);
+    if (!sheet || sheet.getLastRow() < 2) return { success: true, data: [] };
+
+    const lastRow = sheet.getLastRow();
+    const numRows = Math.min(lastRow - 1, 500);
+    const data = sheet.getRange(lastRow - numRows + 1, 1, numRows, 7).getValues();
+
+    let records = data.map(row => ({
+      timestamp: row[0] instanceof Date ? row[0].toLocaleString('pt-BR', {
+        day:'2-digit', month:'2-digit', year:'numeric',
+        hour:'2-digit', minute:'2-digit', second:'2-digit'
+      }) : String(row[0]),
+      action:  String(row[1] || ''),
+      bikes:   String(row[2] || ''),
+      actor:   String(row[3] || ''),
+      details: String(row[4] || ''),
+      origin:  String(row[5] || ''),
+      status:  String(row[6] || ''),
+    })).reverse(); // mais recentes primeiro
+
+    if (filterActor) records = records.filter(r => r.actor.toLowerCase().includes(filterActor.toLowerCase()));
+    if (filterAction) records = records.filter(r => r.action.toLowerCase().includes(filterAction.toLowerCase()));
+    if (limit) records = records.slice(0, parseInt(limit));
+
+    return { success: true, data: records };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
 
 // --- STATUS CONSTANTS ---
 const STATUS = {
@@ -318,6 +385,7 @@ function doPost(e) {
       case 'saveDailySummary':      response = { ...saveDailySummary(request.summaryData), version: BACKEND_VERSION }; break;
       case 'getAdminAlerts':        response = { ...getAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
       case 'clearAdminAlerts':      response = { ...clearAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
+      case 'getAuditLog':          response = { ...getAuditLog(request.limit, request.filterActor, request.filterAction), version: BACKEND_VERSION }; break;
       case 'getDirections':        response = { ...getDirections(request.fromLat, request.fromLng, request.toLat, request.toLng), version: BACKEND_VERSION }; break;
       case 'getBikeMovement':      response = { ...getBikeMovement(request.bikeNumber, request.limit), version: BACKEND_VERSION }; break;
       case 'confirmMechanicsReceipt': response = { ...confirmMechanicsReceipt(request.bikeNumber, request.mechanicName), version: BACKEND_VERSION }; break;
@@ -1398,13 +1466,20 @@ function clearDriverRoute(driverName) {
     const data = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
     const driverLower = driverName.toString().trim().toLowerCase();
     let changed = false;
+    const cancelledBikes = [];
     for (let i = 0; i < data.length; i++) {
       const acceptedBy = (data[i][COLUMN_INDICES.REQUESTS.ACEITA_POR - 1] || '').toString().trim().toLowerCase();
       const status = (data[i][COLUMN_INDICES.REQUESTS.SITUACAO - 1] || '').toString().trim().toLowerCase();
       if (acceptedBy === driverLower && status === 'aceita') {
         sheet.getRange(i + 2, COLUMN_INDICES.REQUESTS.SITUACAO).setValue(STATUS.CANCELADA);
+        const bikes = (data[i][COLUMN_INDICES.REQUESTS.PATRIMONIO - 1] || '').toString().split(',').map(s => s.trim()).filter(Boolean);
+        cancelledBikes.push(...bikes);
         changed = true;
       }
+    }
+    if (changed && cancelledBikes.length > 0) {
+      writeAuditLog('Roteiro Cancelado', cancelledBikes, driverName,
+        `${cancelledBikes.length} bike(s) removida(s) do roteiro`, 'App');
     }
     return { success: true, message: changed ? 'Roteiro cancelado.' : 'Nenhuma rota ativa.' };
   } catch (e) {
@@ -1457,6 +1532,11 @@ function finalizeRouteBike(request) {
     routeBikes = routeBikes.filter(b => String(b).trim() !== String(bikeNumber).trim());
     if (finalStatus === 'Recolhida') {
       if (!collectedBikes.map(String).includes(String(bikeNumber))) collectedBikes.push(bikeNumber);
+      writeAuditLog('Retirada do Roteiro → Posse', [bikeNumber], driverName,
+        `Bike recolhida pelo motorista`, 'App');
+    } else {
+      writeAuditLog('Retirada do Roteiro', [bikeNumber], driverName,
+        `Status: ${finalStatus}${finalObservation ? ' | Obs: ' + finalObservation : ''}`, 'App');
     }
 
     const statusLower = finalStatus.toLowerCase();
@@ -1493,6 +1573,8 @@ function finalizeCollectedBike(request) {
 
     collectedBikes = collectedBikes.filter(b => String(b).trim() !== String(bikeNumber).trim());
     const reportStatus = finalStatus === 'Filial' ? 'Recolhida' : finalStatus;
+    writeAuditLog('Retirada da Posse', [bikeNumber], driverName,
+      `Destino: ${finalStatus}${finalObservation ? ' | Obs: ' + finalObservation : ''}`, 'App');
     const rowData = [new Date(), bikeNumber, reportStatus, finalObservation, driverName,
       bikeDetails['Status'], bikeDetails['Bateria'], bikeDetails['Trava'], bikeDetails['Localidade']];
     logReport(rowData);
@@ -3076,12 +3158,18 @@ function finalizeTrailer(trailerName) {
   if (!sheet) return { success: false, error: 'Planilha Mecânica não encontrada.' };
   const data = sheet.getDataRange().getValues();
   let count = 0;
+  const remanejadas = [];
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][COLUMN_INDICES.MECHANICS.CARRETINHA - 1]) === String(trailerName)
         && data[i][COLUMN_INDICES.MECHANICS.STATUS - 1] === 'Reserva') {
       sheet.getRange(i + 1, COLUMN_INDICES.MECHANICS.STATUS).setValue('Remanejada');
+      remanejadas.push(String(data[i][COLUMN_INDICES.MECHANICS.PATRIMONIO - 1]));
       count++;
     }
+  }
+  if (count > 0) {
+    writeAuditLog('Carretinha Finalizada', remanejadas, 'Mecânica',
+      `Carretinha: ${trailerName} | ${count} bike(s) remanejada(s)`, 'App');
   }
   return { success: true, message: `${count} bikes finalizadas da carretinha ${trailerName}.` };
 }
@@ -3156,8 +3244,18 @@ function cleanupRecentDuplicates() {
       }
     }
     const unique = [...new Set(rowsToDelete)].sort((a, b) => b - a);
+    const deletedBikes = unique.map(row => {
+      const rowIdx = row - startRow;
+      return (data[rowIdx] ? data[rowIdx][COLUMN_INDICES.REPORTS.PATRIMONIO - 1] : '').toString();
+    }).filter(Boolean);
     unique.forEach(row => { try { sheet.deleteRow(row); } catch (e) {} });
-    if (unique.length > 0) SpreadsheetApp.flush();
+    if (unique.length > 0) {
+      SpreadsheetApp.flush();
+      if (deletedBikes.length > 0) {
+        writeAuditLog('Duplicata Removida do Relatório', deletedBikes, 'Sistema',
+          `${unique.length} linha(s) duplicada(s) removida(s) automaticamente`, 'Planilha');
+      }
+    }
     return unique.length;
   } finally {
     lock.releaseLock();
