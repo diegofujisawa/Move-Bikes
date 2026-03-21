@@ -1842,22 +1842,27 @@ function checkAllDivergences() {
   if (lastRow < 2) return;
 
   // Processa apenas os últimos registros — evita reprocessar histórico inteiro
-  const numRows = Math.min(lastRow - 1, 50);
+  const numRows = Math.min(lastRow - 1, 100);
   const data = reportSheet.getRange(lastRow - numRows + 1, 1, numRows, reportSheet.getLastColumn()).getValues();
   const now = new Date();
-  const TWO_HOURS = 2 * 60 * 60 * 1000;
-
+  
   data.forEach(row => {
     try {
-      // Só processa registros das últimas 2 horas
-      const ts = new Date(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
-      if (isNaN(ts.getTime()) || (now - ts) > TWO_HOURS) return;
-      checkDivergences(row);
+      const ts = parseTimestamp(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
+      if (!ts) return;
+      
+      // Regra: Somente ocorrências do dia
+      const isToday = ts.getFullYear() === now.getFullYear() &&
+                      ts.getMonth() === now.getMonth() &&
+                      ts.getDate() === now.getDate();
+      if (!isToday) return;
+      
+      checkDivergences(row, ts);
     } catch (e) {}
   });
 }
 
-function checkDivergences(rowData) {
+function checkDivergences(rowData, timestamp) {
   const patrimonio  = rowData[COLUMN_INDICES.REPORTS.PATRIMONIO - 1];
   const status      = (rowData[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim();
   const observacao  = (rowData[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim();
@@ -1867,27 +1872,34 @@ function checkDivergences(rowData) {
   const bVal = parseFloat(String(bateriaRaw).replace('%', '').replace(',', '.')) || 0;
   const bateria = bVal <= 1 ? Math.round(bVal * 100) : Math.round(bVal);
   const localidade  = (rowData[COLUMN_INDICES.REPORTS.LOCALIDADE - 1] || '').toString().trim();
-  const filiais     = ['Filial', 'Serttel Filial SJC', 'Serttel Filial 1'];
-  const isFilial    = filiais.some(f => localidade.toLowerCase().includes(f.toLowerCase()));
 
-  if (isFilial && bateria > 70) {
-    const isException = ['manutenção', 'manutencao', 'solicitação', 'solicitacao']
-      .some(t => observacao.toLowerCase().includes(t));
-    if (!isException) addDivergenceNotification(`Bike ${patrimonio}: Bateria alta na Filial (${bateria}%).`, motorista, patrimonio);
+  const statusLower = status.toLowerCase();
+  const obsLower = observacao.toLowerCase();
+  const statusSistLower = statusSist.toLowerCase();
+
+  // 1- Se no relatorio apontar bike recolhida, bateria baixa, mas a bateria estiver superior a 70%
+  if (statusLower.includes('recolhida') && obsLower.includes('bateria baixa') && bateria > 70) {
+    addDivergenceNotification(`Bike ${patrimonio}: Recolhida como Bateria Baixa, mas está com ${bateria}%.`, motorista, patrimonio, timestamp);
   }
 
-  if (!isFilial && bateria <= 50 && localidade !== '' && !localidade.toLowerCase().includes('fora da estação')) {
-    addDivergenceNotification(`Bike ${patrimonio}: Bateria baixa em ${localidade} (${bateria}%).`, motorista, patrimonio);
+  // 2- Se for colocado na estação bike com bateria abaixo de 50%
+  if (statusLower.includes('estação') && bateria < 50) {
+    addDivergenceNotification(`Bike ${patrimonio}: Colocada na Estação com bateria baixa (${bateria}%).`, motorista, patrimonio, timestamp);
   }
 
-  const isStation = !isFilial && localidade !== '' && !localidade.toLowerCase().includes('fora da estação');
-  if (isStation && statusSist.toLowerCase() !== 'ativo') {
-    addDivergenceNotification(`Bike ${patrimonio}: Status ${statusSist} em ${localidade}.`, motorista, patrimonio);
+  // 3- Se For colocado na estação, mas a localização for diferente entre a coluna D (Observação) e a coluna I (Localidade)
+  if (statusLower.includes('estação') && observacao !== '' && localidade !== '' && observacao !== localidade) {
+    addDivergenceNotification(`Bike ${patrimonio}: Localização divergente (${observacao} vs ${localidade}).`, motorista, patrimonio, timestamp);
+  }
+
+  // 4- Se for colocado uma bike na estação com status diferente de "Ativo"
+  if (statusLower.includes('estação') && statusSistLower !== 'ativo' && statusSistLower !== '') {
+    addDivergenceNotification(`Bike ${patrimonio}: Colocada na Estação com status ${statusSist}.`, motorista, patrimonio, timestamp);
   }
 }
 
-function addDivergenceNotification(messageBase, driverName, patrimonio) {
-  logDivergence(driverName, patrimonio, messageBase);
+function addDivergenceNotification(messageBase, driverName, patrimonio, timestamp) {
+  logDivergence(driverName, patrimonio, messageBase, timestamp);
   const accessSheet = getSpreadsheet().getSheetByName(ACCESS_SHEET_NAME);
   if (!accessSheet) return;
   const accessData = accessSheet.getDataRange().getValues();
@@ -1897,10 +1909,10 @@ function addDivergenceNotification(messageBase, driverName, patrimonio) {
   const notificationsMap = {};
   adms.forEach(adm => { notificationsMap[adm] = `⚠️ DIVERGÊNCIA (${driverName}): ${messageBase}`; });
   if (driverName) notificationsMap[driverName] = `⚠️ ATENÇÃO: Inconsistência na bike ${patrimonio}: ${messageBase}`;
-  batchAddNotifications(notificationsMap);
+  batchAddNotifications(notificationsMap, timestamp);
 }
 
-function batchAddNotifications(notificationsMap) {
+function batchAddNotifications(notificationsMap, eventTimestamp) {
   let sheet = getSpreadsheet().getSheetByName(NOTIFICATIONS_SHEET_NAME);
   if (!sheet) {
     sheet = getSpreadsheet().insertSheet(NOTIFICATIONS_SHEET_NAME);
@@ -1912,16 +1924,27 @@ function batchAddNotifications(notificationsMap) {
   const userRows = {};
   for (let i = 1; i < data.length; i++) userRows[data[i][0]] = i + 1;
 
+  const props = PropertiesService.getScriptProperties().getProperties();
+  const eventTime = eventTimestamp ? new Date(eventTimestamp).getTime() : 0;
+
   Object.keys(notificationsMap).forEach(userName => {
     const message = notificationsMap[userName];
-    const notification = { msg: message, time: new Date().toISOString(), id: Utilities.getUuid() };
     const rowIndex = userRows[userName];
+    
+    // Verifica se o usuário limpou alertas após este evento
+    const lastClear = parseInt(props['lastClearAlert_' + userName] || '0');
+    if (eventTime > 0 && eventTime <= lastClear) return;
+
+    const notification = { msg: message, time: new Date().toISOString(), id: Utilities.getUuid(), eventTime: eventTime };
+    
     if (!rowIndex) {
       sheet.appendRow([userName, JSON.stringify([notification])]);
     } else {
       let current = [];
       try { current = JSON.parse(sheet.getRange(rowIndex, COLUMN_INDICES.NOTIFICATIONS.JSON).getValue() || '[]'); } catch (e) {}
-      const isDuplicate = current.some(n => n.msg === message && (new Date() - new Date(n.time)) < 6 * 60 * 60 * 1000);
+      
+      // Evita duplicatas exatas do mesmo evento
+      const isDuplicate = current.some(n => n.msg === message && n.eventTime === eventTime);
       if (!isDuplicate) {
         current.unshift(notification);
         if (current.length > 50) current = current.slice(0, 50);
@@ -1929,68 +1952,34 @@ function batchAddNotifications(notificationsMap) {
       }
     }
   });
+  SpreadsheetApp.flush();
 }
 
-function logDivergence(driverName, patrimonio, message) {
+function logDivergence(driverName, patrimonio, message, eventTimestamp) {
   let sheet = getSpreadsheet().getSheetByName(DIVERGENCE_SHEET_NAME);
   if (!sheet) {
     sheet = getSpreadsheet().insertSheet(DIVERGENCE_SHEET_NAME);
-    sheet.appendRow(['Data/Hora', 'Motorista', 'Patrimônio', 'Mensagem']);
-    sheet.getRange(1, 1, 1, 4).setFontWeight('bold').setBackground('#f3f3f3');
+    sheet.appendRow(['Data/Hora', 'Motorista', 'Patrimônio', 'Mensagem', 'Timestamp Evento']);
+    sheet.getRange(1, 1, 1, 5).setFontWeight('bold').setBackground('#f3f3f3');
     sheet.setFrozenRows(1);
   }
 
-  const now = new Date();
-  const SIX_HOURS = 6 * 60 * 60 * 1000;
-
-  // Verifica se algum ADM confirmou leitura após a última ocorrência desta divergência
-  // Se sim, não recria — a divergência foi lida e confirmada
-  const props = PropertiesService.getScriptProperties().getProperties();
-  for (const key of Object.keys(props)) {
-    if (key.startsWith('lastClearAlert_')) {
-      const clearTime = new Date(props[key]);
-      if (!isNaN(clearTime.getTime()) && (now - clearTime) < SIX_HOURS) {
-        // Um ADM limpou os alertas nas últimas 6h
-        // Só recria se a divergência for mais recente que a limpeza
-        // Verifica se já existe esta divergência após a limpeza
-        const lastRow = sheet.getLastRow();
-        if (lastRow > 1) {
-          const numCheck = Math.min(lastRow - 1, 50);
-          const data = sheet.getRange(lastRow - numCheck + 1, 1, numCheck, 4).getValues();
-          for (let i = data.length - 1; i >= 0; i--) {
-            const rowDate = new Date(data[i][0]);
-            if (isNaN(rowDate.getTime())) continue;
-            if (rowDate < clearTime) break; // anterior à limpeza — para
-            if ((data[i][1] || '').toString() === driverName &&
-                (data[i][2] || '').toString() === patrimonio.toString() &&
-                (data[i][3] || '').toString() === message) {
-              return; // já existe após a limpeza — não duplica
-            }
-          }
-        }
-        break;
-      }
-    }
-  }
-
-  // Previne duplicatas nas últimas 6 horas
+  const eventTime = eventTimestamp ? new Date(eventTimestamp).getTime() : 0;
   const lastRow = sheet.getLastRow();
   if (lastRow > 1) {
-    const numCheck = Math.min(lastRow - 1, 200);
-    const data = sheet.getRange(lastRow - numCheck + 1, 1, numCheck, 4).getValues();
+    const numCheck = Math.min(lastRow - 1, 100);
+    const data = sheet.getRange(lastRow - numCheck + 1, 1, numCheck, 5).getValues();
     for (let i = data.length - 1; i >= 0; i--) {
-      const rowDate = new Date(data[i][0]);
-      if (isNaN(rowDate.getTime())) continue;
-      if (now - rowDate > SIX_HOURS) break;
       if ((data[i][1] || '').toString() === driverName &&
           (data[i][2] || '').toString() === patrimonio.toString() &&
-          (data[i][3] || '').toString() === message) {
-        return; // já existe nas últimas 6h — não duplica
+          (data[i][3] || '').toString() === message &&
+          (data[i][4] || 0).toString() === eventTime.toString()) {
+        return; // Já logado
       }
     }
   }
 
-  sheet.appendRow([now, driverName, patrimonio, message]);
+  sheet.appendRow([new Date(), driverName, patrimonio, message, eventTime]);
 }
 
 function getAdminAlerts(adminName) {
