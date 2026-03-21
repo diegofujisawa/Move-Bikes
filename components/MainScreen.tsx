@@ -254,7 +254,9 @@ const MainScreen: React.FC<MainScreenProps> = ({
     oeste:   { lat: -23.5433, lng: -46.7333, label: 'ZONA OESTE' },
     central: { lat: -23.5433, lng: -46.6333, label: 'ZONA CENTRAL' }
   }), []);
-  const [lastViewedAlertCount, setLastViewedAlertCount] = useState(0);
+  const [lastViewedAlertCount, setLastViewedAlertCount] = useState<number>(() => {
+    try { return parseInt(localStorage.getItem('lastViewedAlertCount') || '0', 10); } catch { return 0; }
+  });
   const [editingDriver, setEditingDriver] = useState<any>(null);
 
   // --- Dados auxiliares ---
@@ -465,38 +467,19 @@ const MainScreen: React.FC<MainScreenProps> = ({
   useEffect(() => {
     if (!driverName) return;
 
-    // Pedidos pendentes — Firebase complementa o Sheets, não substitui
+    // Pedidos pendentes — Firebase usado APENAS para notificação push de novos pedidos
+    // O estado real de pendingRequests vem exclusivamente do Sheets via sync
     const qRequests = query(collection(db, 'requests'));
     const unsubRequests = onSnapshot(qRequests, (snapshot) => {
-      const firebaseRequests: any[] = [];
-      let hasNew = false;
       snapshot.docChanges().forEach(change => {
         if (change.type === 'added') {
           const d = change.doc.data();
-          if (d.status === 'PENDENTE' && (d.recipient === driverName || d.recipient === 'Todos')) hasNew = true;
+          const status = (d.status || '').toString().toLowerCase();
+          if (status === 'pendente' && (d.recipient === driverName || d.recipient === 'Todos')) {
+            showNotification('Novo Pedido', 'Você tem uma nova solicitação pendente.');
+          }
         }
       });
-      snapshot.forEach(doc => {
-        const d = doc.data();
-        const status = (d.status || d.situacao || '').toString().toLowerCase().trim();
-        const isPending = !status || status === 'pendente';
-        if (isPending && (d.recipient === driverName || d.recipient === 'Todos')) {
-          firebaseRequests.push({ id: doc.id, ...d });
-        }
-      });
-      // Só atualiza se Firebase trouxe requests — não limpa requests do Sheets
-      if (firebaseRequests.length > 0) {
-        setPendingRequests(prev => {
-          // Mescla: mantém requests do Sheets (id numérico) + adiciona do Firebase
-          const sheetsReqs = prev.filter(r => !isNaN(Number(r.id)));
-          const merged = [...sheetsReqs];
-          firebaseRequests.forEach(fr => {
-            if (!merged.find(r => String(r.id) === String(fr.id))) merged.push(fr);
-          });
-          return merged;
-        });
-      }
-      if (hasNew) showNotification('Novo Pedido', 'Você tem uma nova solicitação pendente.');
     }, err => console.error('Listener requests:', err));
 
     // Estado do motorista
@@ -537,9 +520,17 @@ const MainScreen: React.FC<MainScreenProps> = ({
       const qAlerts = query(collection(db, 'alerts'));
       unsubAlerts = onSnapshot(qAlerts, snapshot => {
         const updated: any[] = [];
-        snapshot.forEach(doc => updated.push({ id: doc.id, ...doc.data() }));
+        snapshot.forEach(doc => {
+          const d = doc.data();
+          // Só conta alertas pendentes/não resolvidos
+          const status = (d.status || d.situacao || '').toString().toLowerCase();
+          if (!status || status === 'pending' || status === 'pendente') {
+            updated.push({ id: doc.id, ...d });
+          }
+        });
         setAlerts(updated);
-        setAlertCount(updated.length);
+        // Não atualiza alertCount aqui — será feito pelo sync do Sheets
+        // para evitar contagem duplicada
       }, err => console.error('Listener alertas:', err));
 
       // Listener de notificações de carretinha finalizada
@@ -1052,19 +1043,9 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const handleCreateRequest = async (details: { bikeNumber: string; location: string; reason: string; recipient: string }) => {
     setIsLoading(true);
     try {
-      let coords = { latitude: 0, longitude: 0 };
-      try { coords = await getCurrentPosition(); } catch {}
-      await addDoc(collection(db, 'requests'), {
-        bikeNumber: details.bikeNumber, location: details.location,
-        reason: details.reason, recipient: details.recipient,
-        status: 'Pendente', timestamp: serverTimestamp(),
-        driverName, latitude: coords.latitude, longitude: coords.longitude
-      });
-      apiCall({ action: 'createRequest', patrimonio: details.bikeNumber, ocorrencia: details.reason, local: details.location, recipient: details.recipient }, 1, true)
-        .catch(e => console.warn('[Sheets] createRequest:', e));
-      alert('Solicitação criada!');
-      setRequestModalOpen(false);
-      refreshAll(true);
+      const result = await apiCall({ action: 'createRequest', patrimonio: details.bikeNumber, ocorrencia: details.reason, local: details.location, recipient: details.recipient }, 1, true);
+      if (result.success) { alert('Solicitação criada!'); setRequestModalOpen(false); refreshAll(true); }
+      else throw new Error(result.error);
     } catch (err: any) {
       alert(`Erro: ${err.message}`);
     } finally { setIsLoading(false); }
@@ -1074,14 +1055,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
     if (!details.bikeNumbers?.length) { alert('Insira ao menos uma bicicleta.'); return; }
     setIsLoading(true);
     try {
-      let coords = { latitude: 0, longitude: 0 };
-      try { coords = await getCurrentPosition(); } catch {}
-      await addDoc(collection(db, 'requests'), {
-        bikeNumber: details.bikeNumbers.join(', '), location: 'Criado via Roteiro App',
-        reason: details.routeName || 'Roteiro', recipient: details.recipient || 'Todos',
-        status: 'Pendente', timestamp: serverTimestamp(),
-        driverName, latitude: coords.latitude, longitude: coords.longitude
-      });
       const result = await apiCall({
         action: 'createRequest', patrimonio: details.bikeNumbers.join(', '),
         ocorrencia: details.routeName || 'Roteiro', local: 'Criado via Roteiro App',
@@ -1098,14 +1071,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
     if (!details.bikeNumbers?.length) { alert('Insira ao menos uma bicicleta.'); return; }
     setIsLoading(true);
     try {
-      let coords = { latitude: 0, longitude: 0 };
-      try { coords = await getCurrentPosition(); } catch {}
-      await addDoc(collection(db, 'requests'), {
-        bikeNumber: details.bikeNumbers.join(', '), location: 'Criado via Carretinha App',
-        reason: `[CARRETINHA] ${details.routeName || 'Sem Nome'}`,
-        recipient: details.recipient || 'Todos', status: 'Pendente',
-        timestamp: serverTimestamp(), driverName, latitude: coords.latitude, longitude: coords.longitude
-      });
       const result = await apiCall({
         action: 'createRequest', patrimonio: details.bikeNumbers.join(', '),
         ocorrencia: `[CARRETINHA] ${details.routeName || 'Sem Nome'}`,
@@ -1687,7 +1652,11 @@ const MainScreen: React.FC<MainScreenProps> = ({
         if (d.adminAlerts) {
           const n = d.adminAlerts.length;
           setAlertCount(n);
-          if (n > lastViewedAlertCount) setHasNewAlerts(true);
+          // Só mostra badge se há alertas novos além do que já foi visto
+          setLastViewedAlertCount(prev => {
+            if (n > prev) setHasNewAlerts(true);
+            return prev; // não altera lastViewed — só muda ao clicar no botão
+          });
         }
       }
     };
@@ -1711,7 +1680,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
       setIsSyncing(false);
       if (isAdm) { setIsSummaryLoading(false); setIsAlertsLoading(false); setIsVandalizedLoading(false); }
     }
-  }, [driverName, category, summaryTimeRange, statusTimeRange, applyStateFromSheets, isAdm, lastViewedAlertCount]);
+  }, [driverName, category, summaryTimeRange, statusTimeRange, applyStateFromSheets, isAdm]);
 
   // Cache inicial
   useEffect(() => {
@@ -2032,23 +2001,6 @@ const MainScreen: React.FC<MainScreenProps> = ({
       });
 
       if (response.success) {
-        // Adicionar solicitação única no Firestore para notificação imediata
-        const bikes = response.data || [];
-        if (bikes.length > 0) {
-          const bikeNumbers = bikes.map((b: any) => b.patrimonio).join(', ');
-          await addDoc(collection(db, 'requests'), {
-            bikeNumber: bikeNumbers,
-            location: 'Criado via Roteiro Automático',
-            reason: 'ROTEIRO GERADO',
-            recipient: driverName,
-            status: 'Pendente',
-            timestamp: serverTimestamp(),
-            driverName,
-            latitude: location.lat,
-            longitude: location.lng
-          });
-        }
-        
         setSuccessMessage(response.message || 'Roteiro gerado com sucesso!');
         setIsRouteConfigOpen(false);
         if (refreshAllRef.current) refreshAllRef.current();
@@ -2138,7 +2090,12 @@ const MainScreen: React.FC<MainScreenProps> = ({
             <button onClick={() => setRequestModalOpen(true)} disabled={isLoading} title="Nova Solicitação" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 disabled:opacity-50"><PlusIcon className="w-6 h-6 sm:w-7 sm:h-7"/></button>
             <button onClick={() => setRouteModalOpen(true)} disabled={isLoading} title="Criar Roteiro" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 disabled:opacity-50"><PlusPlusIcon className="w-6 h-6 sm:w-7 sm:h-7"/></button>
             <button onClick={() => setTrailerModalOpen(true)} disabled={isLoading} title="Carretinha" className="p-1.5 sm:p-2 rounded-full text-gray-500 hover:bg-gray-100 hover:text-blue-600 disabled:opacity-50"><TrailerIcon className="w-6 h-6 sm:w-7 sm:h-7"/></button>
-            <button onClick={() => { setIsAdminAlertsOpen(true); setHasNewAlerts(false); setAlertCount(0); setLastViewedAlertCount(alertCount); }} disabled={isLoading} title="Alertas"
+            <button onClick={() => {
+              setIsAdminAlertsOpen(true);
+              setHasNewAlerts(false);
+              setLastViewedAlertCount(alertCount);
+              try { localStorage.setItem('lastViewedAlertCount', String(alertCount)); } catch {}
+            }} disabled={isLoading} title="Alertas"
               className={`p-1.5 sm:p-2 rounded-full relative disabled:opacity-50 ${hasNewAlerts && alertCount > 0 ? 'text-red-600 bg-red-50 animate-pulse' : 'text-gray-500 hover:bg-gray-100 hover:text-red-600'}`}>
               <AlertTriangleIcon className={`w-6 h-6 sm:w-7 sm:h-7 ${hasNewAlerts && alertCount > 0 ? 'animate-bounce' : ''}`}/>
               {alertCount > 0 && <span className="absolute top-0 right-0 bg-red-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full border-2 border-white">{alertCount}</span>}

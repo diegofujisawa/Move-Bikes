@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { LogoutIcon, MapIcon, XIcon, MovingIcon } from './icons';
 import { DriverLocation } from '../types';
 import { db } from '../firebase';
-import { collection, onSnapshot, query } from 'firebase/firestore';
+import { collection, onSnapshot } from 'firebase/firestore';
+import { apiGetCall } from '../api';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
@@ -10,6 +11,7 @@ interface AdminMapProps {
   adminName: string;
   onLogout: () => void;
   onClose: () => void;
+  driverLocations?: any[];
 }
 
 const normalizeCoord = (coord: number): number => {
@@ -37,10 +39,29 @@ const parseGpsString = (gpsString: string): { lat: number, lng: number } | null 
   } catch { return null; }
 };
 
-const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
+const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose, driverLocations: propLocations = [] }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [driverCount, setDriverCount] = useState(0);
+  const [sheetsLocations, setSheetsLocations] = useState<any[]>(propLocations);
+
+  // Busca lista de motoristas logados do Sheets a cada 15s
+  useEffect(() => {
+    const fetchLoggedDrivers = async () => {
+      try {
+        const r = await apiGetCall('getDriverLocations');
+        if (r.success && r.data) setSheetsLocations(r.data);
+      } catch {}
+    };
+    fetchLoggedDrivers();
+    const interval = setInterval(fetchLoggedDrivers, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Sincroniza com prop quando atualizada externamente
+  useEffect(() => {
+    if (propLocations.length > 0) setSheetsLocations(propLocations);
+  }, [propLocations]);
 
   const mapRef = useRef<L.Map | null>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -134,7 +155,7 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
     setIsLoading(true);
 
     const unsubscribe = onSnapshot(collection(db, 'locations'), (snapshot) => {
-      const locations: DriverLocation[] = [];
+      const firebaseLocations: any[] = [];
       const now = Date.now();
       const TWO_HOURS = 2 * 60 * 60 * 1000;
 
@@ -147,19 +168,39 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
         const lat = normalizeCoord(Number(data.latitude));
         const lng = normalizeCoord(Number(data.longitude));
         if (isNaN(lat) || isNaN(lng) || lat === 0 || lng === 0) return;
-        locations.push({
+        firebaseLocations.push({
           driverName: data.driverName || docSnap.id,
           latitude: lat,
           longitude: lng,
           timestamp: ts ? new Date(ts).toISOString() : '',
           stale: ts ? ageMs > 10 * 60 * 1000 : false,
-        } as any);
+        });
       });
 
+      // Sheets é fonte de verdade para login/logout
+      // Só mostra motorista no mapa se estiver LOGADO na planilha (sheetsLocations)
+      const loggedNames = new Set(sheetsLocations.map((l: any) => (l.driverName || '').toLowerCase()));
+
+      let finalLocations: DriverLocation[];
+      if (sheetsLocations.length > 0) {
+        // Filtra Firebase pelos logados no Sheets; usa posição Firebase (mais recente) se disponível
+        finalLocations = sheetsLocations.map((sl: any) => {
+          const fbMatch = firebaseLocations.find(
+            fl => fl.driverName.toLowerCase() === (sl.driverName || '').toLowerCase()
+          );
+          return fbMatch || sl; // Firebase tem prioridade na posição, Sheets decide quem aparece
+        });
+      } else {
+        // Fallback: sem dados do Sheets ainda, mostra Firebase filtrado por LOGADO
+        finalLocations = firebaseLocations.filter(fl => loggedNames.size === 0 || loggedNames.has(fl.driverName.toLowerCase())) as DriverLocation[];
+      }
+
       setIsLoading(false);
-      updateMapWithLocations(locations);
+      updateMapWithLocations(finalLocations);
     }, (err) => {
       console.error('[Mapa] Erro listener locations:', err);
+      // Fallback: usa apenas Sheets
+      if (sheetsLocations.length > 0) updateMapWithLocations(sheetsLocations as DriverLocation[]);
       setIsLoading(false);
     });
 
@@ -172,7 +213,7 @@ const AdminMap: React.FC<AdminMapProps> = ({ onLogout, onClose }) => {
       markersRef.current = {};
       hasCenteredRef.current = false;
     };
-  }, [updateMapWithLocations]);
+  }, [updateMapWithLocations, sheetsLocations]);
 
   return (
     <div className="bg-white p-6 rounded-xl shadow-lg w-full h-full flex flex-col">
