@@ -677,9 +677,14 @@ const MainScreen: React.FC<MainScreenProps> = ({
   // MEMOS
   // =================================================================
   const sortedRouteBikes = useMemo(() => {
+    // Se já temos distâncias calculadas por carro, a ordem de routeBikes já está otimizada
+    // pelo buildOptimizedRoute (Nearest Neighbor). Só ordena por Haversine se não houver
+    // roteamento disponível ainda.
     if (!currentDriverLocation || !routeBikes.length) return routeBikes;
+    const hasRoadDistances = routeBikes.some(id => routeDistances[id]);
+    if (hasRoadDistances) return routeBikes; // ordem já otimizada pelo Nearest Neighbor
+    // Fallback: Haversine enquanto roteamento não carregou
     return [...routeBikes].sort((a, b) => {
-      if (routeDistances[a] && routeDistances[b]) return routeDistances[a].value - routeDistances[b].value;
       const dA = routeBikesDetails[a], dB = routeBikesDetails[b];
       if (!dA || !dB) return 0;
       if (!dA.currentLat || !dA.currentLng) return 1;
@@ -1715,18 +1720,118 @@ const MainScreen: React.FC<MainScreenProps> = ({
     return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVisibility); };
   }, [refreshAll]);
 
-  // Distâncias Haversine
+  // =================================================================
+  // ROTEAMENTO POR CARRO — Google Directions API + Nearest Neighbor
+  // Usa Google Maps se VITE_GOOGLE_MAPS_KEY estiver definida,
+  // senão usa OSRM (gratuito, sem chave).
+  // =================================================================
+  const GOOGLE_MAPS_KEY = (typeof import.meta !== 'undefined' && ((import.meta as any).env?.VITE_GOOGLE_MAPS_API_KEY || (import.meta as any).env?.VITE_GOOGLE_MAPS_KEY)) || '';
+
+  const getRoadDistance = useCallback(async (
+    fromLat: number, fromLng: number,
+    toLat: number, toLng: number
+  ): Promise<{ distanceM: number, durationS: number }> => {
+    try {
+      if (GOOGLE_MAPS_KEY) {
+        // Proxy via Apps Script — evita CORS do browser
+        const result = await apiCall({
+          action: 'getDirections',
+          fromLat, fromLng, toLat, toLng
+        }, 1, false);
+        if (result.success && result.distanceM) {
+          return { distanceM: result.distanceM, durationS: result.durationS };
+        }
+      }
+      // OSRM gratuito — funciona direto do browser
+      const url = `https://router.project-osrm.org/route/v1/driving/${fromLng},${fromLat};${toLng},${toLat}?overview=false`;
+      const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
+      const data = await r.json();
+      if (data.code === 'Ok' && data.routes?.[0]) {
+        return { distanceM: data.routes[0].distance, durationS: data.routes[0].duration };
+      }
+    } catch (e) {
+      console.warn('[Routing] API falhou, usando Haversine:', e);
+    }
+    // Último fallback: Haversine
+    const km = calculateDistance(fromLat, fromLng, toLat, toLng);
+    return { distanceM: km * 1000, durationS: km * 180 };
+  }, [GOOGLE_MAPS_KEY]);
+
+  const buildOptimizedRoute = useCallback(async () => {
+    if (!currentDriverLocation || !routeBikes.length) return;
+
+    const bikesWithCoords = routeBikes
+      .map(id => ({ id, details: routeBikesDetails[id] }))
+      .filter(b => b.details?.currentLat && b.details?.currentLng);
+
+    if (bikesWithCoords.length === 0) return;
+
+    // Nearest Neighbor partindo da posição do motorista
+    let currentLat = currentDriverLocation.lat;
+    let currentLng = currentDriverLocation.lng;
+    const remaining = [...bikesWithCoords];
+    const ordered: string[] = [];
+    const newDistances: Record<string, { distance: string, duration: string, value: number }> = {};
+
+    while (remaining.length > 0) {
+      // Calcula distância de carro de onde estou para cada bike restante
+      const distances = await Promise.all(
+        remaining.map(async b => {
+          const { distanceM, durationS } = await getRoadDistance(
+            currentLat, currentLng,
+            b.details.currentLat, b.details.currentLng
+          );
+          return { bike: b, distanceM, durationS };
+        })
+      );
+
+      // Pega a mais próxima
+      distances.sort((a, b) => a.distanceM - b.distanceM);
+      const nearest = distances[0];
+      ordered.push(nearest.bike.id);
+
+      const distKm = nearest.distanceM / 1000;
+      const mins = Math.round(nearest.durationS / 60);
+      newDistances[nearest.bike.id] = {
+        distance: distKm < 1 ? `${nearest.distanceM.toFixed(0)}m` : `${distKm.toFixed(1)}km`,
+        duration: `~${mins} min`,
+        value: nearest.distanceM
+      };
+
+      // Avança para a posição dessa bike
+      currentLat = nearest.bike.details.currentLat;
+      currentLng = nearest.bike.details.currentLng;
+      remaining.splice(remaining.indexOf(nearest.bike), 1);
+    }
+
+    // Bikes sem coordenadas ficam no final
+    const withoutCoords = routeBikes.filter(id => !bikesWithCoords.find(b => b.id === id));
+    setRouteDistances(newDistances);
+    // Reordena routeBikes na ordem otimizada
+    setRouteBikes([...ordered, ...withoutCoords]);
+  }, [currentDriverLocation, routeBikes, routeBikesDetails, getRoadDistance]);
+
+  // Dispara roteamento ao mudar posição ou bikes — com debounce de 3s
+  useEffect(() => {
+    if (!currentDriverLocation || !routeBikes.length) return;
+    const timer = setTimeout(() => {
+      buildOptimizedRoute();
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [currentDriverLocation?.lat, currentDriverLocation?.lng, routeBikes.length]);
+
+  // Distâncias Haversine — mantido como display inicial antes do roteamento carregar
   useEffect(() => {
     if (!currentDriverLocation || !routeBikes.length) return;
     const dists: Record<string, any> = {};
     routeBikes.forEach(id => {
       const d = routeBikesDetails[id];
-      if (d?.currentLat && d?.currentLng) {
+      if (d?.currentLat && d?.currentLng && !routeDistances[id]) {
         const km = calculateDistance(currentDriverLocation.lat, currentDriverLocation.lng, d.currentLat, d.currentLng);
         dists[id] = { distance: km < 1 ? `${(km*1000).toFixed(0)}m` : `${km.toFixed(1)}km`, duration: `~${Math.round(km*3)} min`, value: km*1000 };
       }
     });
-    setRouteDistances(dists);
+    if (Object.keys(dists).length > 0) setRouteDistances(prev => ({ ...prev, ...dists }));
   }, [currentDriverLocation, routeBikes, routeBikesDetails]);
 
   // GPS
@@ -2857,14 +2962,31 @@ const MainScreen: React.FC<MainScreenProps> = ({
         {!isAdm && !isMecanica && (
           <div className="mt-6 p-4 border rounded-lg bg-gray-50">
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-lg font-semibold text-gray-700">Roteiro de Recolhas</h2>
-              <button 
-                onClick={() => setIsRouteConfigOpen(true)}
-                className="p-2 text-gray-400 hover:text-blue-600 transition-colors rounded-full hover:bg-blue-50"
-                title="Configurar Roteiro"
-              >
-                <Settings size={20} />
-              </button>
+              <div className="flex items-center gap-2">
+                <h2 className="text-lg font-semibold text-gray-700">Roteiro de Recolhas</h2>
+                {sortedRouteBikes.length > 0 && routeDistances[sortedRouteBikes[0]] && (
+                  <span className="text-[9px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                    🗺️ Rota otimizada
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-1">
+                {sortedRouteBikes.length > 0 && currentDriverLocation && (
+                  <button onClick={() => buildOptimizedRoute()}
+                    className="p-1.5 text-gray-400 hover:text-blue-600 rounded-full hover:bg-blue-50"
+                    title="Recalcular rota">
+                    <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+                      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                    </svg>
+                  </button>
+                )}
+                <button onClick={() => setIsRouteConfigOpen(true)}
+                  className="p-2 text-gray-400 hover:text-blue-600 transition-colors rounded-full hover:bg-blue-50"
+                  title="Configurar Roteiro">
+                  <Settings size={20}/>
+                </button>
+              </div>
             </div>
             {sortedRouteBikes.length > 0 ? (
               <ul className="space-y-2">

@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '83.4-timeline-bikes';
+const BACKEND_VERSION = '83.5-directions-proxy';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -318,7 +318,7 @@ function doPost(e) {
       case 'saveDailySummary':      response = { ...saveDailySummary(request.summaryData), version: BACKEND_VERSION }; break;
       case 'getAdminAlerts':        response = { ...getAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
       case 'clearAdminAlerts':      response = { ...clearAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
-      case 'getBikeMovement':       response = { ...getBikeMovement(request.bikeNumber, request.limit), version: BACKEND_VERSION }; break;
+      case 'getDirections':        response = { ...getDirections(request.fromLat, request.fromLng, request.toLat, request.toLng), version: BACKEND_VERSION }; break;
       case 'confirmMechanicsReceipt': response = { ...confirmMechanicsReceipt(request.bikeNumber, request.mechanicName), version: BACKEND_VERSION }; break;
       case 'insertBikeMechanics':   response = { ...insertBikeMechanics(request.bikeNumber, request.driverName, request.targetStatus), version: BACKEND_VERSION }; break;
       case 'notifyAdmins':          response = { ...notifyAdmins(request.message, request.bikes, request.trailerName), version: BACKEND_VERSION }; break;
@@ -2659,6 +2659,35 @@ function addToMechanics(bikeNumber) {
         && data[i][COLUMN_INDICES.MECHANICS.STATUS - 1] !== 'Remanejada') return;
   }
   sheet.appendRow([bikeNumber, 'Aguardando Confirmação', new Date(), '', '', '', '']);
+}
+
+// =================================================================
+// --- GOOGLE DIRECTIONS PROXY ---
+// Chave configurada em Projeto > Propriedades do Script > GOOGLE_MAPS_KEY
+// =================================================================
+function getDirections(fromLat, fromLng, toLat, toLng) {
+  try {
+    const key = PropertiesService.getScriptProperties().getProperty('GOOGLE_MAPS_KEY');
+    if (!key) return { success: false, error: 'Chave Google Maps não configurada.' };
+
+    const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${fromLat},${fromLng}&destinations=${toLat},${toLng}&mode=driving&language=pt-BR&key=${key}`;
+    const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    const data = JSON.parse(response.getContentText());
+
+    if (data.status === 'OK' && data.rows?.[0]?.elements?.[0]?.status === 'OK') {
+      const el = data.rows[0].elements[0];
+      return {
+        success: true,
+        distanceM: el.distance.value,
+        durationS: el.duration.value,
+        distanceText: el.distance.text,
+        durationText: el.duration.text
+      };
+    }
+    return { success: false, error: 'Google Maps retornou: ' + data.status };
+  } catch (e) {
+    return { success: false, error: 'Erro ao chamar Google Maps: ' + e.message };
+  }
 }
 
 function getBikeMovement(bikeNumber, limit) {
