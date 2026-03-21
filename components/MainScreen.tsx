@@ -585,22 +585,32 @@ const MainScreen: React.FC<MainScreenProps> = ({
     let unsubLocations = () => {};
     if (isAdm) {
       unsubLocations = onSnapshot(collection(db, 'locations'), snapshot => {
-        const liveLocations: any[] = [];
+        const firebaseLocations: any[] = [];
         snapshot.forEach(d => {
           const data = d.data();
           if (!data.latitude || !data.longitude) return;
           const ts = data.timestamp?.toDate?.()?.getTime() || 0;
           const ageMs = Date.now() - ts;
-          if (ageMs > 2 * 60 * 60 * 1000) return; // ignora posições >2h
-          liveLocations.push({
+          if (ageMs > 2 * 60 * 60 * 1000) return;
+          firebaseLocations.push({
             driverName: data.driverName || d.id,
             latitude: data.latitude,
             longitude: data.longitude,
             timestamp: data.timestamp?.toDate?.()?.toISOString() || new Date().toISOString(),
             stale: ageMs > 10 * 60 * 1000,
+            source: 'firebase',
           });
         });
-        if (liveLocations.length > 0) setDriverLocations(liveLocations);
+
+        // Mescla com Sheets: Firebase tem prioridade (mais recente),
+        // mas mantém motoristas que só estão no Sheets
+        setDriverLocations(prev => {
+          const merged = [...firebaseLocations];
+          const firebaseNames = new Set(firebaseLocations.map(l => l.driverName));
+          // Adiciona do Sheets quem não está no Firebase
+          prev.filter(l => !firebaseNames.has(l.driverName)).forEach(l => merged.push({ ...l, stale: true }));
+          return merged;
+        });
       }, err => console.error('Listener locations:', err));
     }
 
@@ -1625,7 +1635,15 @@ const MainScreen: React.FC<MainScreenProps> = ({
       if (d.bikeStatuses) setBikeConflicts(d.bikeStatuses);
       if (d.schedule) setUserSchedule(d.schedule);
       if (d.motoristas) setMotoristas(d.motoristas);
-      if (d.driverLocations) setDriverLocations(d.driverLocations);
+      if (d.driverLocations) {
+        // Mescla Sheets com Firebase — Firebase tem prioridade para quem já enviou posição
+        setDriverLocations(prev => {
+          const fbNames = new Set(prev.filter((l:any) => l.source === 'firebase').map((l:any) => l.driverName));
+          const sheetsOnly = (d.driverLocations as any[]).filter((l:any) => !fbNames.has(l.driverName));
+          const fbLocations = prev.filter((l:any) => l.source === 'firebase');
+          return [...fbLocations, ...sheetsOnly.map((l:any) => ({ ...l, stale: true }))];
+        });
+      }
       if (d.mechanicsList) setMechanicsList(d.mechanicsList);
       if (d.driversSummary) {
         setDriversSummary(prev => d.driversSummary.map((newD: any) => {
@@ -1708,7 +1726,15 @@ const MainScreen: React.FC<MainScreenProps> = ({
       if (d.bikeStatuses) setBikeConflicts(d.bikeStatuses);
       if (d.schedule) setUserSchedule(d.schedule);
       if (d.motoristas) setMotoristas(d.motoristas);
-      if (d.driverLocations) setDriverLocations(d.driverLocations);
+      if (d.driverLocations) {
+        // Mescla Sheets com Firebase — Firebase tem prioridade para quem já enviou posição
+        setDriverLocations(prev => {
+          const fbNames = new Set(prev.filter((l:any) => l.source === 'firebase').map((l:any) => l.driverName));
+          const sheetsOnly = (d.driverLocations as any[]).filter((l:any) => !fbNames.has(l.driverName));
+          const fbLocations = prev.filter((l:any) => l.source === 'firebase');
+          return [...fbLocations, ...sheetsOnly.map((l:any) => ({ ...l, stale: true }))];
+        });
+      }
       if (d.mechanicsList) setMechanicsList(d.mechanicsList);
       if (d.driversSummary) {
         setDriversSummary(prev => d.driversSummary.map((newD: any) => {
@@ -1857,66 +1883,103 @@ const MainScreen: React.FC<MainScreenProps> = ({
     if (Object.keys(dists).length > 0) setRouteDistances(prev => ({ ...prev, ...dists }));
   }, [currentDriverLocation, routeBikes, routeBikesDetails]);
 
-  // GPS — atualização contínua a cada 15s mesmo parado
+  // GPS — máxima persistência, mesmo em background
   useEffect(() => {
     if (category.toUpperCase() !== 'MOTORISTA') return;
     if (!navigator.geolocation) { setGpsError('Seu navegador não suporta geolocalização.'); return; }
 
     let lastSentLat = 0, lastSentLng = 0, lastSentTime = 0;
+    let wakeLock: any = null;
+    let watchId: number | null = null;
 
-    const sendLocation = (latitude: number, longitude: number) => {
+    const sendLocation = (latitude: number, longitude: number, force = false) => {
       const now = Date.now();
       const movedMeters = getDistanceInMeters(latitude, longitude, lastSentLat, lastSentLng);
       const elapsed = now - lastSentTime;
+      if (!force && movedMeters <= 5 && elapsed < 15000) return;
 
-      // Envia se: moveu >5m OU passaram 15s desde o último envio
-      if (movedMeters > 5 || elapsed > 15000) {
-        lastSentLat = latitude;
-        lastSentLng = longitude;
-        lastSentTime = now;
-        lastLocationRef.current = { lat: latitude, lng: longitude };
+      lastSentLat = latitude;
+      lastSentLng = longitude;
+      lastSentTime = now;
+      lastLocationRef.current = { lat: latitude, lng: longitude };
 
-        // Firebase — lido pelo listener do ADM em tempo real
-        setDoc(doc(db, 'locations', driverName), {
-          driverName,
-          latitude,
-          longitude,
-          timestamp: serverTimestamp(),
-          category,
-        }, { merge: true }).catch(() => {});
+      // Firebase tempo real
+      setDoc(doc(db, 'locations', driverName), {
+        driverName, latitude, longitude,
+        timestamp: serverTimestamp(), category,
+      }, { merge: true }).catch(() => {});
 
-        // Sheets — atualiza a planilha para persistência
-        apiGetCall('updateLocation', {
-          driverName,
-          latitude: latitude.toFixed(6),
-          longitude: longitude.toFixed(6)
-        }).catch(() => {});
+      // Sheets — persistência
+      apiGetCall('updateLocation', {
+        driverName,
+        latitude: latitude.toFixed(6),
+        longitude: longitude.toFixed(6)
+      }).catch(() => {});
+    };
+
+    const getCurrentAndSend = (force = false) => {
+      navigator.geolocation.getCurrentPosition(
+        ({ coords: { latitude, longitude } }) => {
+          setGpsError(null);
+          setCurrentDriverLocation({ lat: latitude, lng: longitude });
+          sendLocation(latitude, longitude, force);
+        },
+        () => {},
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
+      );
+    };
+
+    const startWatch = () => {
+      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+      watchId = navigator.geolocation.watchPosition(
+        ({ coords: { latitude, longitude } }) => {
+          setGpsError(null);
+          setCurrentDriverLocation({ lat: latitude, lng: longitude });
+          sendLocation(latitude, longitude);
+        },
+        err => {
+          if (err.code === err.PERMISSION_DENIED)
+            setGpsError('Acesso ao GPS negado. O aplicativo requer localização ativa.');
+        },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 3000 }
+      );
+    };
+
+    // Wake Lock — mantém tela ativa evitando suspensão do browser
+    const requestWakeLock = async () => {
+      try {
+        if ('wakeLock' in navigator) {
+          wakeLock = await (navigator as any).wakeLock.request('screen');
+          wakeLock.addEventListener('release', () => {
+            // Reaquire se a página ainda está visível
+            if (document.visibilityState === 'visible') requestWakeLock();
+          });
+        }
+      } catch (e) {} // silencioso — nem todos os browsers suportam
+    };
+
+    // Ao voltar ao foco: reaquire wake lock, reinicia watch e força envio imediato
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        requestWakeLock();
+        startWatch();
+        getCurrentAndSend(true);
       }
     };
 
-    const watchId = navigator.geolocation.watchPosition(
-      ({ coords: { latitude, longitude } }) => {
-        setGpsError(null);
-        setCurrentDriverLocation({ lat: latitude, lng: longitude });
-        sendLocation(latitude, longitude);
-      },
-      err => {
-        if (err.code === err.PERMISSION_DENIED) setGpsError('Acesso ao GPS negado. O aplicativo requer localização ativa.');
-        else if (err.code === err.POSITION_UNAVAILABLE) setGpsError('Localização indisponível. Verifique se o GPS está ligado.');
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 5000 }
-    );
+    // Intervalo de segurança a cada 20s — captura posição mesmo se watchPosition parar
+    const fallbackInterval = setInterval(() => getCurrentAndSend(), 20000);
 
-    // Garante envio a cada 15s mesmo se watchPosition não disparar (app em background)
-    const forceInterval = setInterval(() => {
-      if (lastLocationRef.current) {
-        sendLocation(lastLocationRef.current.lat, lastLocationRef.current.lng);
-      }
-    }, 15000);
+    // Inicializa
+    requestWakeLock();
+    startWatch();
+    document.addEventListener('visibilitychange', onVisibility);
 
     return () => {
-      navigator.geolocation.clearWatch(watchId);
-      clearInterval(forceInterval);
+      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+      clearInterval(fallbackInterval);
+      document.removeEventListener('visibilitychange', onVisibility);
+      if (wakeLock) wakeLock.release().catch(() => {});
     };
   }, [driverName, category]);
 
