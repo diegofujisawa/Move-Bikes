@@ -110,6 +110,13 @@ const getDistanceInMeters = (lat1: number, lon1: number, lat2: number, lon2: num
 // =================================================================
 // COMPONENTE PRINCIPAL
 // =================================================================
+
+// Helper: data local no formato YYYY-MM-DD (evita problema de fuso UTC)
+const localDateStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+};
+
 // =================================================================
 // --- ADMIN ALERTS COMPONENT (inline) ---
 // =================================================================
@@ -217,6 +224,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
   const [driversSummary, setDriversSummary] = useState<any[]>([]);
   const [firebaseTimelineEvents, setFirebaseTimelineEvents] = useState<Record<string, Array<{tsMs: number, type: string, bikeNumber?: string}>>>({});
   const [timelineModal, setTimelineModal] = useState<{driver: string, events: any[], startMs: number, endMs: number} | null>(null);
+  const [timelineDate, setTimelineDate] = useState<string>(localDateStr()); // YYYY-MM-DD
   const [summaryTimeRange, setSummaryTimeRange] = useState<'day' | 'week' | 'month' | '-1' | '-7'>('day');
   const [isSummaryLoading, setIsSummaryLoading] = useState(false);
   const [activeQuadrant, setActiveQuadrant] = useState<'summary' | 'alerts' | 'vandalized' | 'status' | 'mechanics' | 'bike_search'>('summary');
@@ -553,22 +561,37 @@ const MainScreen: React.FC<MainScreenProps> = ({
     // Listener de timeline_events (para ADM — enriquece a timeline dos motoristas)
     let unsubTimeline = () => {};
     if (isAdm) {
-      const today = new Date().toISOString().slice(0, 10);
+      setFirebaseTimelineEvents({}); // limpa ao trocar de data
       const qTimeline = query(
         collection(db, 'timeline_events'),
-        where('date', '==', today)
+        where('date', '==', timelineDate)
       );
       unsubTimeline = onSnapshot(qTimeline, snapshot => {
-        const byDriver: Record<string, Array<{tsMs: number, type: string}>> = {};
+        const byDriver: Record<string, Array<{tsMs: number, type: string, bikeNumber?: string}>> = {};
         snapshot.forEach(d => {
           const data = d.data();
           const driver = data.driverName;
           if (!driver) return;
-          const ts = data.timestamp?.toDate?.() || new Date();
+          // serverTimestamp() pode ser null na primeira escrita (pendingWrite)
+          // Nesse caso usa o timestamp local do documento como fallback
+          const ts = data.timestamp?.toDate?.()
+            || (d.metadata.hasPendingWrites ? new Date() : null);
+          if (!ts) return;
           if (!byDriver[driver]) byDriver[driver] = [];
-          byDriver[driver].push({ tsMs: ts.getTime(), type: data.type || 'recolhida', bikeNumber: data.bikeNumber || '' });
+          byDriver[driver].push({
+            tsMs: ts.getTime(),
+            type: data.type || 'em_posse',
+            bikeNumber: data.bikeNumber || ''
+          });
         });
-        setFirebaseTimelineEvents(byDriver);
+        // Preserva eventos anteriores — mescla com novos
+        setFirebaseTimelineEvents(prev => {
+          const merged = { ...prev };
+          Object.entries(byDriver).forEach(([driver, events]) => {
+            merged[driver] = events;
+          });
+          return merged;
+        });
       }, err => console.error('Listener timeline:', err));
     }
 
@@ -606,7 +629,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
     }
 
     return () => { unsubRequests(); unsubAlerts(); unsubUser(); unsubNotifications(); unsubTimeline(); unsubReload(); unsubLocations(); };
-  }, [driverName, isAdm]);
+  }, [driverName, isAdm, timelineDate]);
 
   // =================================================================
   // GARANTIA DE UNICIDADE
@@ -785,7 +808,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
         addDoc(collection(db, 'timeline_events'), {
           driverName, bikeNumber, type: 'em_posse',
           timestamp: serverTimestamp(),
-          date: new Date().toISOString().slice(0, 10)
+          date: localDateStr()
         }).then(() => {
           console.log('[Timeline] Evento em_posse gravado:', bikeNumber);
         }).catch(err => {
@@ -981,7 +1004,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
           addDoc(collection(db, 'timeline_events'), {
             driverName, bikeNumber: id, type: 'recolhida',
             timestamp: serverTimestamp(),
-            date: new Date().toISOString().slice(0, 10)
+            date: localDateStr()
           }).catch(() => {});
         });
       } else {
@@ -1498,7 +1521,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
     const range = summaryTimeRange;
     setIsSummaryLoading(true);
     try {
-      const r = await apiCall({ action: 'getDriversSummary', timeRange: range }, 1, true);
+      const r = await apiCall({ action: 'getDriversSummary', timeRange: range, timelineDate }, 1, true);
       if (r.success && summaryTimeRange === range) {
         setDriversSummary(prev => {
           // Preserva timeline e timelineWindow anteriores se o novo dado não tem eventos
@@ -1520,7 +1543,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
     finally { setIsSummaryLoading(false); }
   };
 
-  useEffect(() => { fetchDriversSummary(); }, [summaryTimeRange]);
+  useEffect(() => { fetchDriversSummary(); }, [summaryTimeRange, timelineDate]);
 
   const runDriversSummaryFallback = async () => {
     const range = summaryTimeRange;
@@ -1663,7 +1686,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
 
     try {
       setSyncError(null);
-      const result = await apiCall({ action: 'sync', driverName, category, summaryTimeRange, statusTimeRange }, 2, true);
+      const result = await apiCall({ action: 'sync', driverName, category, summaryTimeRange, statusTimeRange, timelineDate }, 2, true);
       if (result.success && result.data) {
         applyData(result.data);
         localStorage.setItem('cached_main_data', JSON.stringify(result.data));
@@ -2611,6 +2634,28 @@ const MainScreen: React.FC<MainScreenProps> = ({
                       ))}
                     </div>
                   </div>
+
+                  {/* Seletor de data da Linha do Tempo */}
+                  <div className="flex items-center gap-2 mb-3 p-2 bg-white border rounded-lg shadow-sm">
+                    <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-purple-500 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                    <span className="text-[9px] font-black text-gray-400 uppercase tracking-wider whitespace-nowrap">Linha do Tempo</span>
+                    <input
+                      type="date"
+                      value={timelineDate}
+                      max={localDateStr()}
+                      onChange={e => {
+                        setTimelineDate(e.target.value);
+                        setFirebaseTimelineEvents({});
+                      }}
+                      className="flex-1 text-[10px] font-mono text-purple-700 border-0 bg-transparent focus:outline-none cursor-pointer"
+                    />
+                    {timelineDate !== localDateStr() && (
+                      <button onClick={() => { setTimelineDate(localDateStr()); setFirebaseTimelineEvents({}); }}
+                        className="text-[9px] text-purple-500 font-bold hover:text-purple-700 whitespace-nowrap">
+                        Hoje
+                      </button>
+                    )}
+                  </div>
                   {driversSummary.length > 0 ? (
                     <div className="grid grid-cols-1 gap-3">
                       {driversSummary.map((driver, i) => (
@@ -2624,11 +2669,13 @@ const MainScreen: React.FC<MainScreenProps> = ({
 
                           {/* Linha do tempo de atividade */}
                           {(() => {
+                            const isToday = timelineDate === localDateStr();
                             const sheetsEvents = (driver.timeline || []) as Array<{tsMs: number, hour: number, min: number, type: string, bikeNumber?: string}>;
-                            const fbEvents = (firebaseTimelineEvents[driver.name] || []).map((e: any) => ({
+                            // Eventos Firebase (em_posse) só disponíveis para hoje
+                            const fbEvents = isToday ? (firebaseTimelineEvents[driver.name] || []).map((e: any) => ({
                               tsMs: e.tsMs, hour: new Date(e.tsMs).getHours(),
                               min: new Date(e.tsMs).getMinutes(), type: e.type, bikeNumber: e.bikeNumber
-                            }));
+                            })) : [];
                             const merged = [...sheetsEvents];
                             fbEvents.forEach(fe => {
                               const isDup = sheetsEvents.some(se => se.type === fe.type && Math.abs(se.tsMs - fe.tsMs) < 2 * 60 * 1000);

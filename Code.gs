@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '84.0-audit-log';
+const BACKEND_VERSION = '84.1-timeline-date';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -344,7 +344,7 @@ function doPost(e) {
     }
 
     switch (action) {
-      case 'getDriversSummary':     response = { ...getDriversSummary(request.timeRange), version: BACKEND_VERSION }; break;
+      case 'getDriversSummary':     response = { ...getDriversSummary(request.timeRange, null, null, request.timelineDate), version: BACKEND_VERSION }; break;
       case 'getVehiclePlates':      response = { ...getVehiclePlates(), version: BACKEND_VERSION }; break;
       case 'login':                 response = { ...handleLogin(request.login, request.password, request.plate, request.kmInicial), version: BACKEND_VERSION }; break;
       case 'logout':                response = { ...handleLogout(request.userName), version: BACKEND_VERSION }; break;
@@ -549,7 +549,7 @@ function generateDriverRoute(driverName, location, filters, maxBikes, rangeKm) {
 }
 
 function handleSync(request) {
-  const { driverName, category, summaryTimeRange, statusTimeRange } = request;
+  const { driverName, category, summaryTimeRange, statusTimeRange, timelineDate } = request;
   const catNorm = normalizeCategory(category);
   const isAdm = catNorm.includes('ADM');
   const isMecanica = catNorm.includes('MECANICA') || catNorm.includes('MECANICO');
@@ -599,7 +599,7 @@ function handleSync(request) {
         access: getSheet(ACCESS_SHEET_NAME), report: getSheet(REPORT_SHEET_NAME),
         state: getSheet(STATE_SHEET_NAME), requests: getSheet(REQUESTS_SHEET_NAME),
         stations: getSheet(STATIONS_SHEET_NAME)
-      }).data || [];
+      }, null, timelineDate).data || [];
       response.data.alerts = getAlerts().data || [];
       response.data.vandalized = getVandalized().data || [];
       response.data.changeStatusData = getChangeStatusData(statusTimeRange, {
@@ -2463,7 +2463,7 @@ function getChangeStatusData(timeRange = '24h', providedSheets = null) {
   }
 }
 
-function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameFilter = null) {
+function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameFilter = null, timelineDate = null) {
   const cacheKey = `summary_${timeRange}_${driverNameFilter || 'all'}`;
   const cache = CacheService.getScriptCache();
   // Não usa cache para 'day' e '-1' — precisam de timeline em tempo real
@@ -2496,6 +2496,15 @@ function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameF
     const filterDate = new Date(); filterDate.setHours(0,0,0,0);
     let endDate = new Date(); endDate.setHours(23,59,59,999);
     let rowsToRead = 1000;
+
+    // Se timelineDate específica foi fornecida, usa ela para a timeline
+    let timelineFilterDate = filterDate;
+    let timelineEndDate = endDate;
+    if (timelineDate) {
+      const parts = timelineDate.split('-');
+      timelineFilterDate = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]), 0, 0, 0, 0);
+      timelineEndDate = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]), 23, 59, 59, 999);
+    }
 
     if (timeRange === 'week') {
       const day = now.getDay();
@@ -2569,16 +2578,20 @@ function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameF
       });
     }
 
-    // Monta timeline de eventos por motorista (apenas para timeRange 'day' e '-1')
+    // Monta timeline de eventos por motorista
+    // Se timelineDate fornecida, usa essa data específica; senão usa filterDate/endDate do período
     const timelines = {};
-    const timelineWindows = {}; // { startMs, endMs } por motorista
+    const timelineWindows = {};
     drivers.forEach(d => { timelines[d] = []; });
-    if (timeRange === 'day' || timeRange === '-1') {
-      // Primeira passagem: pega todos os eventos incluindo INICIO_TURNO
-      const driverFirstLast = {}; // { firstMs, lastMs }
+    if (timeRange === 'day' || timeRange === '-1' || timelineDate) {
+      const tlStart = timelineDate ? timelineFilterDate : filterDate;
+      const tlEnd   = timelineDate ? timelineEndDate   : endDate;
+
+      // Primeira passagem: pega todos os eventos para determinar janela
+      const driverFirstLast = {};
       reportsData.forEach(row => {
         const ts = parseTimestamp(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
-        if (!ts || ts < filterDate || ts > endDate) return;
+        if (!ts || ts < tlStart || ts > tlEnd) return;
         const driverRaw = (row[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
         const driverKey = driverLookup[driverRaw.toLowerCase()];
         if (!driverKey) return;
@@ -2588,10 +2601,10 @@ function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameF
         if (tsMs > driverFirstLast[driverKey].lastMs) driverFirstLast[driverKey].lastMs = tsMs;
       });
 
-      // Segunda passagem: monta eventos (excluindo INICIO_TURNO/FIM_TURNO do plot)
+      // Segunda passagem: monta eventos
       reportsData.forEach(row => {
         const ts = parseTimestamp(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
-        if (!ts || ts < filterDate || ts > endDate) return;
+        if (!ts || ts < tlStart || ts > tlEnd) return;
         const driverRaw = (row[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
         const driverKey = driverLookup[driverRaw.toLowerCase()];
         if (!driverKey) return;
@@ -2609,7 +2622,6 @@ function getDriversSummary(timeRange = 'day', providedSheets = null, driverNameF
         }
       });
 
-      // Define janela por motorista
       drivers.forEach(d => {
         const fl = driverFirstLast[d];
         if (fl) timelineWindows[d] = { startMs: fl.firstMs, endMs: fl.lastMs };
