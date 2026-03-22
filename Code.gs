@@ -387,6 +387,7 @@ function doPost(e) {
       case 'clearAdminAlerts':      response = { ...clearAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
       case 'getAuditLog':          response = { ...getAuditLog(request.limit, request.filterActor, request.filterAction), version: BACKEND_VERSION }; break;
       case 'getDirections':        response = { ...getDirections(request.fromLat, request.fromLng, request.toLat, request.toLng), version: BACKEND_VERSION }; break;
+      case 'getBatchDirections':   response = { success: true, data: getBatchDirections(request.fromLat, request.fromLng, request.destinations), version: BACKEND_VERSION }; break;
       case 'getBikeMovement':      response = { ...getBikeMovement(request.bikeNumber, request.limit), version: BACKEND_VERSION }; break;
       case 'confirmMechanicsReceipt': response = { ...confirmMechanicsReceipt(request.bikeNumber, request.mechanicName), version: BACKEND_VERSION }; break;
       case 'insertBikeMechanics':   response = { ...insertBikeMechanics(request.bikeNumber, request.driverName, request.targetStatus), version: BACKEND_VERSION }; break;
@@ -520,18 +521,38 @@ function generateDriverRoute(driverName, location, filters, maxBikes, rangeKm) {
       return true;
     });
 
-    const route = filteredBikes
+    const routeCandidates = filteredBikes
       .sort((a, b) => a.distance - b.distance)
-      .slice(0, maxBikes);
+      .slice(0, maxBikes * 2); // Pega o dobro para refinar com Google Maps
 
-    if (route.length === 0) {
+    if (routeCandidates.length === 0) {
       return { success: true, data: [], message: 'Nenhuma bicicleta encontrada com os critérios selecionados.' };
+    }
+
+    // Refina com Google Maps se disponível
+    let finalRoute = routeCandidates;
+    const roadDistances = getBatchDirections(location.lat, location.lng, routeCandidates.map(b => ({ lat: b.latitude, lng: b.longitude })));
+    
+    if (roadDistances) {
+      routeCandidates.forEach((bike, i) => {
+        const road = roadDistances[i];
+        if (road) {
+          bike.distance = road.distanceM / 1000;
+          bike.roadDistanceText = road.distanceText;
+          bike.roadDurationText = road.durationText;
+        }
+      });
+      finalRoute = routeCandidates
+        .sort((a, b) => a.distance - b.distance)
+        .slice(0, maxBikes);
+    } else {
+      finalRoute = routeCandidates.slice(0, maxBikes);
     }
 
     // Cria solicitação na planilha
     const requestSheet = getSpreadsheet().getSheetByName(REQUESTS_SHEET_NAME);
     if (requestSheet) {
-      const patrimonios = route.map(b => b.patrimonio).join(', ');
+      const patrimonios = finalRoute.map(b => b.patrimonio).join(', ');
       const newRow = new Array(requestSheet.getLastColumn()).fill('');
       newRow[COLUMN_INDICES.REQUESTS.TIMESTAMP - 1]    = new Date();
       newRow[COLUMN_INDICES.REQUESTS.PATRIMONIO - 1]   = patrimonios;
@@ -542,7 +563,7 @@ function generateDriverRoute(driverName, location, filters, maxBikes, rangeKm) {
       requestSheet.appendRow(newRow);
     }
 
-    return { success: true, data: route, message: `Roteiro gerado com ${route.length} bicicletas.` };
+    return { success: true, data: finalRoute, message: `Roteiro gerado com ${finalRoute.length} bicicletas.` };
   } catch (e) {
     return { success: false, error: 'Erro ao gerar roteiro: ' + e.message };
   }
@@ -2764,27 +2785,41 @@ function addToMechanics(bikeNumber) {
 // Chave configurada em Projeto > Propriedades do Script > GOOGLE_MAPS_KEY
 // =================================================================
 function getDirections(fromLat, fromLng, toLat, toLng) {
+  const results = getBatchDirections(fromLat, fromLng, [{ lat: toLat, lng: toLng }]);
+  if (results && results[0]) {
+    return { success: true, ...results[0] };
+  }
+  return { success: false, error: 'Não foi possível obter direções.' };
+}
+
+function getBatchDirections(fromLat, fromLng, destinations) {
   try {
     const key = PropertiesService.getScriptProperties().getProperty('GOOGLE_MAPS_KEY');
-    if (!key) return { success: false, error: 'Chave Google Maps não configurada.' };
+    if (!key) return null;
 
-    const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${fromLat},${fromLng}&destinations=${toLat},${toLng}&mode=driving&language=pt-BR&key=${key}`;
+    // Google Distance Matrix permite até 25 destinos por chamada no plano padrão
+    const destStr = destinations.map(d => `${d.lat},${d.lng}`).join('|');
+    const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${fromLat},${fromLng}&destinations=${destStr}&mode=driving&language=pt-BR&key=${key}`;
     const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
     const data = JSON.parse(response.getContentText());
 
-    if (data.status === 'OK' && data.rows?.[0]?.elements?.[0]?.status === 'OK') {
-      const el = data.rows[0].elements[0];
-      return {
-        success: true,
-        distanceM: el.distance.value,
-        durationS: el.duration.value,
-        distanceText: el.distance.text,
-        durationText: el.duration.text
-      };
+    if (data.status === 'OK' && data.rows?.[0]?.elements) {
+      return data.rows[0].elements.map(el => {
+        if (el.status === 'OK') {
+          return {
+            distanceM: el.distance.value,
+            durationS: el.duration.value,
+            distanceText: el.distance.text,
+            durationText: el.duration.text
+          };
+        }
+        return null;
+      });
     }
-    return { success: false, error: 'Google Maps retornou: ' + data.status };
+    return null;
   } catch (e) {
-    return { success: false, error: 'Erro ao chamar Google Maps: ' + e.message };
+    Logger.log('Erro em getBatchDirections: ' + e.message);
+    return null;
   }
 }
 
