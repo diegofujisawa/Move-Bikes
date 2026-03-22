@@ -69,5 +69,17 @@ service cloud.firestore {
       allow create, update: if isUserAdmin() || (isAuthenticated() && isValidAlert(request.resource.data));
       allow delete: if isUserAdmin();
     }
+
+    match /locations/{id} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /timeline_events/{id} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /notifications/{id} {
+      allow read, write: if isAuthenticated();
+    }
   }
 }

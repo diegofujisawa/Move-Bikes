@@ -27,7 +27,7 @@ export const auth = getAuth(app);
 
 // Login anônimo automático ao inicializar com mecanismo de retry
 const performAnonymousLogin = (retryCount = 0) => {
-  const MAX_RETRIES = 5;
+  const MAX_RETRIES = 3;
   
   // Verifica se está online antes de tentar
   if (typeof window !== 'undefined' && !navigator.onLine) {
@@ -36,16 +36,19 @@ const performAnonymousLogin = (retryCount = 0) => {
     return;
   }
 
+  console.log(`[Firebase] Tentando login anônimo (tentativa ${retryCount + 1})...`);
   signInAnonymously(auth)
     .then(() => console.log('[Firebase] Login anônimo realizado com sucesso.'))
     .catch((err) => {
-      console.error(`[Firebase] Erro no login anônimo (tentativa ${retryCount + 1}):`, err);
+      console.error(`[Firebase] Erro no login anônimo (tentativa ${retryCount + 1}):`, err.code, err.message);
       
       // Se for erro de rede, tenta novamente com backoff exponencial
-      if (err.code === 'auth/network-request-failed' && retryCount < MAX_RETRIES) {
-        const delay = Math.pow(2, retryCount) * 1000 + Math.random() * 1000;
+      if ((err.code === 'auth/network-request-failed' || err.code === 'auth/internal-error') && retryCount < MAX_RETRIES) {
+        const delay = Math.pow(2, retryCount) * 2000 + Math.random() * 1000;
         console.log(`[Firebase] Retentando login anônimo em ${Math.round(delay)}ms...`);
         setTimeout(() => performAnonymousLogin(retryCount + 1), delay);
+      } else if (err.code === 'auth/operation-not-allowed') {
+        console.error('[Firebase] Login anônimo não está habilitado no console do Firebase.');
       }
     });
 };

@@ -13,10 +13,11 @@ import {
 } from 'lucide-react';
 import { Html5Qrcode } from 'html5-qrcode';
 import { auth, db } from '../firebase';
+import { waitForAuth } from '../firebase';
 import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
 import {
-  collection, onSnapshot, query, where, doc, updateDoc, addDoc,
-  serverTimestamp, setDoc
+  collection, onSnapshot, doc, updateDoc, addDoc,
+  serverTimestamp, getDoc, setDoc, deleteDoc, getDocs
 } from 'firebase/firestore';
 import ScheduleModal from './ScheduleModal';
 import ReporModal from './ReporModal';
@@ -125,20 +126,14 @@ const AdminAlerts: React.FC<{adminName: string, isOpen: boolean, onClose: () => 
   const fetchAdmAlerts = async () => {
     if (!adminName) return;
     setAdmLoading(true);
-    try { 
-      const r = await apiCall({ action: 'getAdminAlerts', adminName }); 
-      if (r.success) setAdmAlerts(r.alerts || []); 
-    }
-    catch { } finally { setAdmLoading(false); }
+    try { const r = await apiCall({ action: 'getAdminAlerts', adminName }); if (r.success) setAdmAlerts(r.alerts || []); }
+    catch(e) {} finally { setAdmLoading(false); }
   };
   const clearAdmAlerts = async () => {
     if (!confirm('Confirmar leitura de todos os alertas?')) return;
     setAdmLoading(true);
-    try { 
-      const r = await apiCall({ action: 'clearAdminAlerts', adminName }); 
-      if (r.success) setAdmAlerts([]); 
-    }
-    catch { } finally { setAdmLoading(false); }
+    try { const r = await apiCall({ action: 'clearAdminAlerts', adminName }); if (r.success) setAdmAlerts([]); }
+    catch(e) {} finally { setAdmLoading(false); }
   };
   React.useEffect(() => {
     if (isOpen) { fetchAdmAlerts(); const t = setInterval(fetchAdmAlerts, 10000); return () => clearInterval(t); }
@@ -267,6 +262,9 @@ const MainScreen: React.FC<MainScreenProps> = ({
     oeste:   { lat: -23.5433, lng: -46.7333, label: 'ZONA OESTE' },
     central: { lat: -23.5433, lng: -46.6333, label: 'ZONA CENTRAL' }
   }), []);
+  const [lastViewedAlertCount, setLastViewedAlertCount] = useState<number>(() => {
+    try { return parseInt(localStorage.getItem('lastViewedAlertCount') || '0', 10); } catch { return 0; }
+  });
   const [editingDriver, setEditingDriver] = useState<any>(null);
 
   // --- Dados auxiliares ---
@@ -318,6 +316,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
   // =================================================================
   const isUpdatingStateRef = useRef(false);
   const lastDriverActionAt = useRef<number>(0);
+  const lastLocationUpdateRef = useRef<number>(0);
   const lastLocationRef = useRef<{ lat: number, lng: number } | null>(null);
 
   const normalizedCategory = category.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -336,6 +335,49 @@ const MainScreen: React.FC<MainScreenProps> = ({
     lastDriverActionAt.current = Date.now();
   };
 
+  /**
+   * Sincroniza requests do Sheets para o Firebase.
+   * Sheets é a fonte de verdade para requests — se foi deletado/finalizado
+   * na planilha, remove do Firebase para o listener parar de exibir.
+   */
+  const syncRequestsToFirebase = useCallback(async (sheetsRequests: any[]) => {
+    try {
+      const snapshot = await getDocs(collection(db, 'requests'));
+
+      // IDs que ainda existem no Sheets como pendentes (apenas Firestore IDs)
+      const activeSheetsIds = new Set(
+        sheetsRequests
+          .filter(r => {
+            const status = (r.status || r.situacao || '').toString().toLowerCase().trim();
+            return !status || status === 'pendente';
+          })
+          .map(r => String(r.id))
+          .filter(id => id.length > 10 && isNaN(Number(id))) // só IDs do Firestore
+      );
+
+      // Deleta do Firebase qualquer request que não está mais pendente no Sheets
+      const deletePromises: Promise<void>[] = [];
+      snapshot.docs.forEach(docSnap => {
+        const data = docSnap.data();
+        const status = (data.status || '').toString().toLowerCase();
+        // Se está pendente no Firebase mas não está mais no Sheets como pendente
+        if (status === 'pendente' && !activeSheetsIds.has(docSnap.id)) {
+          deletePromises.push(deleteDoc(doc(db, 'requests', docSnap.id)));
+        }
+      });
+
+      if (deletePromises.length > 0) {
+        await Promise.all(deletePromises);
+      }
+    } catch (e) {
+      console.warn('[Sync] syncRequestsToFirebase falhou:', e);
+    }
+  }, []);
+
+  /**
+   * Verifica se o sync do Sheets pode sobrescrever o estado local.
+   * Retorna false se houver uma ação recente do motorista.
+   */
   const canSheetsOverride = () => {
     const elapsed = Date.now() - lastDriverActionAt.current;
     return elapsed > DRIVER_ACTION_GRACE_MS;
@@ -435,8 +477,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
 
     // Pedidos pendentes — Firebase usado APENAS para notificação push de novos pedidos
     // O estado real de pendingRequests vem exclusivamente do Sheets via sync
-    const qRequests = query(collection(db, 'requests'));
-    const unsubRequests = onSnapshot(qRequests, (snapshot) => {
+    const unsubRequests = onSnapshot(collection(db, 'requests'), (snapshot) => {
       snapshot.docChanges().forEach(change => {
         if (change.type === 'added') {
           const d = change.doc.data();
@@ -459,15 +500,13 @@ const MainScreen: React.FC<MainScreenProps> = ({
     }, err => console.error('Listener usuário:', err));
 
     // Listener de force_reload — ADM pode forçar atualização de todos os usuários
-    const qReload = query(
-      collection(db, 'notifications'),
-      where('type', '==', 'force_reload')
-    );
-    const unsubReload = onSnapshot(qReload, snapshot => {
+    // Sem where() para evitar necessidade de índice composto no Firestore
+    const unsubReload = onSnapshot(collection(db, 'notifications'), snapshot => {
       if (isAdm) return; // ADM não recarrega
       snapshot.docChanges().forEach(change => {
         if (change.type === 'added') {
           const data = change.doc.data();
+          if (data.type !== 'force_reload') return; // filtra no cliente
           const ts = data.timestamp?.toDate?.()?.getTime() || 0;
           const now = Date.now();
           // Só recarrega se a notificação foi criada nos últimos 10 segundos
@@ -483,8 +522,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
     let unsubAlerts = () => {};
     let unsubNotifications = () => {};
     if (isAdm) {
-      const qAlerts = query(collection(db, 'alerts'));
-      unsubAlerts = onSnapshot(qAlerts, snapshot => {
+      unsubAlerts = onSnapshot(collection(db, 'alerts'), snapshot => {
         const updated: any[] = [];
         snapshot.forEach(doc => {
           const d = doc.data();
@@ -499,16 +537,13 @@ const MainScreen: React.FC<MainScreenProps> = ({
         // para evitar contagem duplicada
       }, err => console.error('Listener alertas:', err));
 
-      // Listener de notificações de carretinha finalizada
-      const qNotif = query(
-        collection(db, 'notifications'),
-        where('recipient', '==', 'ADM'),
-        where('type', '==', 'trailer_finalizado')
-      );
-      unsubNotifications = onSnapshot(qNotif, snapshot => {
+      // Listener de notificações de carretinha — sem where() para evitar índice composto
+      unsubNotifications = onSnapshot(collection(db, 'notifications'), snapshot => {
         snapshot.docChanges().forEach(change => {
           if (change.type === 'added') {
             const data = change.doc.data();
+            // Filtra no cliente
+            if (data.type !== 'trailer_finalizado' || data.recipient !== 'ADM') return;
             const msg = data.message || `Carretinha finalizada. Bikes: ${(data.bikes || []).join(', ')}`;
             setAdminNotification({ id: change.doc.id, message: msg, bikes: data.bikes || [], trailerName: data.trailerName });
           }
@@ -520,16 +555,15 @@ const MainScreen: React.FC<MainScreenProps> = ({
     let unsubTimeline = () => {};
     if (isAdm) {
       setFirebaseTimelineEvents({}); // limpa ao trocar de data
-      const qTimeline = query(
-        collection(db, 'timeline_events'),
-        where('date', '==', timelineDate)
-      );
-      unsubTimeline = onSnapshot(qTimeline, snapshot => {
+      // Sem where() para evitar necessidade de índice — filtra no cliente
+      unsubTimeline = onSnapshot(collection(db, 'timeline_events'), snapshot => {
         const byDriver: Record<string, Array<{tsMs: number, type: string, bikeNumber?: string}>> = {};
         snapshot.forEach(d => {
           const data = d.data();
           const driver = data.driverName;
           if (!driver) return;
+          // Filtra pela data selecionada no cliente
+          if (data.date && data.date !== timelineDate) return;
           // serverTimestamp() pode ser null na primeira escrita (pendingWrite)
           // Nesse caso usa o timestamp local do documento como fallback
           const ts = data.timestamp?.toDate?.()
@@ -1736,37 +1770,34 @@ const MainScreen: React.FC<MainScreenProps> = ({
   // =================================================================
   const GOOGLE_MAPS_KEY = (typeof import.meta !== 'undefined' && ((import.meta as any).env?.VITE_GOOGLE_MAPS_API_KEY || (import.meta as any).env?.VITE_GOOGLE_MAPS_KEY)) || '';
 
-  const getBatchRoadDistances = useCallback(async (
+  const getRoadDistance = useCallback(async (
     fromLat: number, fromLng: number,
-    destinations: { lat: number, lng: number }[]
-  ): Promise<{ distanceM: number, durationS: number }[] | null> => {
-    if (!destinations.length) return [];
+    toLat: number, toLng: number
+  ): Promise<{ distanceM: number, durationS: number }> => {
     try {
       if (GOOGLE_MAPS_KEY) {
+        // Proxy via Apps Script — evita CORS do browser
         const result = await apiCall({
-          action: 'getBatchDirections',
-          fromLat, fromLng, destinations
+          action: 'getDirections',
+          fromLat, fromLng, toLat, toLng
         }, 1, false);
-        if (result.success && result.data) {
-          return result.data;
+        if (result.success && result.distanceM) {
+          return { distanceM: result.distanceM, durationS: result.durationS };
         }
       }
-      // OSRM Table API
-      const coords = [`${fromLng},${fromLat}`, ...destinations.map(d => `${d.lng},${d.lat}`)].join(';');
-      const url = `https://router.project-osrm.org/table/v1/driving/${coords}?sources=0&annotations=distance,duration`;
-      const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      // OSRM gratuito — funciona direto do browser
+      const url = `https://router.project-osrm.org/route/v1/driving/${fromLng},${fromLat};${toLng},${toLat}?overview=false`;
+      const r = await fetch(url, { signal: AbortSignal.timeout(5000) });
       const data = await r.json();
-      if (data.code === 'Ok' && data.distances?.[0]) {
-        // OSRM retorna distâncias em metros e durações em segundos
-        return data.distances[0].slice(1).map((dist: number, i: number) => ({
-          distanceM: dist,
-          durationS: data.durations[0][i + 1]
-        }));
+      if (data.code === 'Ok' && data.routes?.[0]) {
+        return { distanceM: data.routes[0].distance, durationS: data.routes[0].duration };
       }
     } catch (e) {
-      console.warn('[Routing] Batch API falhou:', e);
+      console.warn('[Routing] API falhou, usando Haversine:', e);
     }
-    return null;
+    // Último fallback: Haversine
+    const km = calculateDistance(fromLat, fromLng, toLat, toLng);
+    return { distanceM: km * 1000, durationS: km * 180 };
   }, [GOOGLE_MAPS_KEY]);
 
   const buildOptimizedRoute = useCallback(async () => {
@@ -1778,52 +1809,50 @@ const MainScreen: React.FC<MainScreenProps> = ({
 
     if (bikesWithCoords.length === 0) return;
 
-    // Calcula distâncias de carro a partir da posição ATUAL do motorista para TODAS as bikes
-    const batchResults = await getBatchRoadDistances(
-      currentDriverLocation.lat, currentDriverLocation.lng,
-      bikesWithCoords.map(b => ({ lat: b.details.currentLat, lng: b.details.currentLng }))
-    );
-
+    // Nearest Neighbor partindo da posição do motorista
+    let currentLat = currentDriverLocation.lat;
+    let currentLng = currentDriverLocation.lng;
+    const remaining = [...bikesWithCoords];
+    const ordered: string[] = [];
     const newDistances: Record<string, { distance: string, duration: string, value: number }> = {};
-    const bikesWithDist: { id: string, distanceM: number }[] = [];
 
-    if (batchResults) {
-      bikesWithCoords.forEach((b, i) => {
-        const res = batchResults[i];
-        if (res) {
-          const distKm = res.distanceM / 1000;
-          const mins = Math.round(res.durationS / 60);
-          newDistances[b.id] = {
-            distance: distKm < 1 ? `${res.distanceM.toFixed(0)}m` : `${distKm.toFixed(1)}km`,
-            duration: `~${mins} min`,
-            value: res.distanceM
-          };
-          bikesWithDist.push({ id: b.id, distanceM: res.distanceM });
-        } else {
-          // Fallback Haversine se um elemento falhou
-          const km = calculateDistance(currentDriverLocation.lat, currentDriverLocation.lng, b.details.currentLat, b.details.currentLng);
-          bikesWithDist.push({ id: b.id, distanceM: km * 1000 });
-        }
-      });
-    } else {
-      // Fallback total Haversine
-      bikesWithCoords.forEach(b => {
-        const km = calculateDistance(currentDriverLocation.lat, currentDriverLocation.lng, b.details.currentLat, b.details.currentLng);
-        bikesWithDist.push({ id: b.id, distanceM: km * 1000 });
-      });
+    while (remaining.length > 0) {
+      // Calcula distância de carro de onde estou para cada bike restante
+      const distances = await Promise.all(
+        remaining.map(async b => {
+          const { distanceM, durationS } = await getRoadDistance(
+            currentLat, currentLng,
+            b.details.currentLat, b.details.currentLng
+          );
+          return { bike: b, distanceM, durationS };
+        })
+      );
+
+      // Pega a mais próxima
+      distances.sort((a, b) => a.distanceM - b.distanceM);
+      const nearest = distances[0];
+      ordered.push(nearest.bike.id);
+
+      const distKm = nearest.distanceM / 1000;
+      const mins = Math.round(nearest.durationS / 60);
+      newDistances[nearest.bike.id] = {
+        distance: distKm < 1 ? `${nearest.distanceM.toFixed(0)}m` : `${distKm.toFixed(1)}km`,
+        duration: `~${mins} min`,
+        value: nearest.distanceM
+      };
+
+      // Avança para a posição dessa bike
+      currentLat = nearest.bike.details.currentLat;
+      currentLng = nearest.bike.details.currentLng;
+      remaining.splice(remaining.indexOf(nearest.bike), 1);
     }
-
-    // Ordena pelo GPS do motorista (mais próxima no topo)
-    bikesWithDist.sort((a, b) => a.distanceM - b.distanceM);
-    const ordered = bikesWithDist.map(b => b.id);
 
     // Bikes sem coordenadas ficam no final
     const withoutCoords = routeBikes.filter(id => !bikesWithCoords.find(b => b.id === id));
-    
-    setRouteDistances(prev => ({ ...prev, ...newDistances }));
-    // Reordena routeBikes: mais próxima do motorista no topo
+    setRouteDistances(newDistances);
+    // Reordena routeBikes na ordem otimizada
     setRouteBikes([...ordered, ...withoutCoords]);
-  }, [currentDriverLocation, routeBikes, routeBikesDetails, getBatchRoadDistances]);
+  }, [currentDriverLocation, routeBikes, routeBikesDetails, getRoadDistance]);
 
   // Dispara roteamento ao mudar posição ou bikes — com debounce de 3s
   useEffect(() => {
@@ -1921,7 +1950,7 @@ const MainScreen: React.FC<MainScreenProps> = ({
             if (document.visibilityState === 'visible') requestWakeLock();
           });
         }
-      } catch {} // silencioso — nem todos os browsers suportam
+      } catch (e) {} // silencioso — nem todos os browsers suportam
     };
 
     // Ao voltar ao foco: reaquire wake lock, reinicia watch e força envio imediato

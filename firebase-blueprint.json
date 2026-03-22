@@ -91,6 +91,45 @@
         "status": { "type": "string", "enum": ["Pendente", "Encontrada"] }
       },
       "required": ["bikeNumber", "type", "status"]
+    },
+    "Location": {
+      "title": "Location",
+      "description": "Real-time driver location.",
+      "type": "object",
+      "properties": {
+        "driverName": { "type": "string" },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["driverName", "latitude", "longitude", "timestamp"]
+    },
+    "TimelineEvent": {
+      "title": "Timeline Event",
+      "description": "Events for driver timeline.",
+      "type": "object",
+      "properties": {
+        "driverName": { "type": "string" },
+        "type": { "type": "string" },
+        "bikeNumber": { "type": "string" },
+        "date": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["driverName", "type", "date", "timestamp"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "System notifications and commands.",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string" },
+        "message": { "type": "string" },
+        "recipient": { "type": "string" },
+        "bikes": { "type": "array", "items": { "type": "string" } },
+        "trailerName": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["type", "timestamp"]
     }
   },
   "firestore": {
@@ -113,6 +152,18 @@
     "/alerts/{id}": {
       "schema": "Alert",
       "description": "Collection of system alerts."
+    },
+    "/locations/{id}": {
+      "schema": "Location",
+      "description": "Collection of real-time locations."
+    },
+    "/timeline_events/{id}": {
+      "schema": "TimelineEvent",
+      "description": "Collection of timeline events."
+    },
+    "/notifications/{id}": {
+      "schema": "Notification",
+      "description": "Collection of system notifications."
     }
   }
 }

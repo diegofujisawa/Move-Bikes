@@ -21,7 +21,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '84.1-timeline-date';
+const BACKEND_VERSION = '84.2-divergence-fix';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -387,7 +387,6 @@ function doPost(e) {
       case 'clearAdminAlerts':      response = { ...clearAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
       case 'getAuditLog':          response = { ...getAuditLog(request.limit, request.filterActor, request.filterAction), version: BACKEND_VERSION }; break;
       case 'getDirections':        response = { ...getDirections(request.fromLat, request.fromLng, request.toLat, request.toLng), version: BACKEND_VERSION }; break;
-      case 'getBatchDirections':   response = { success: true, data: getBatchDirections(request.fromLat, request.fromLng, request.destinations), version: BACKEND_VERSION }; break;
       case 'getBikeMovement':      response = { ...getBikeMovement(request.bikeNumber, request.limit), version: BACKEND_VERSION }; break;
       case 'confirmMechanicsReceipt': response = { ...confirmMechanicsReceipt(request.bikeNumber, request.mechanicName), version: BACKEND_VERSION }; break;
       case 'insertBikeMechanics':   response = { ...insertBikeMechanics(request.bikeNumber, request.driverName, request.targetStatus), version: BACKEND_VERSION }; break;
@@ -521,38 +520,18 @@ function generateDriverRoute(driverName, location, filters, maxBikes, rangeKm) {
       return true;
     });
 
-    const routeCandidates = filteredBikes
+    const route = filteredBikes
       .sort((a, b) => a.distance - b.distance)
-      .slice(0, maxBikes * 2); // Pega o dobro para refinar com Google Maps
+      .slice(0, maxBikes);
 
-    if (routeCandidates.length === 0) {
+    if (route.length === 0) {
       return { success: true, data: [], message: 'Nenhuma bicicleta encontrada com os critérios selecionados.' };
-    }
-
-    // Refina com Google Maps se disponível
-    let finalRoute = routeCandidates;
-    const roadDistances = getBatchDirections(location.lat, location.lng, routeCandidates.map(b => ({ lat: b.latitude, lng: b.longitude })));
-    
-    if (roadDistances) {
-      routeCandidates.forEach((bike, i) => {
-        const road = roadDistances[i];
-        if (road) {
-          bike.distance = road.distanceM / 1000;
-          bike.roadDistanceText = road.distanceText;
-          bike.roadDurationText = road.durationText;
-        }
-      });
-      finalRoute = routeCandidates
-        .sort((a, b) => a.distance - b.distance)
-        .slice(0, maxBikes);
-    } else {
-      finalRoute = routeCandidates.slice(0, maxBikes);
     }
 
     // Cria solicitação na planilha
     const requestSheet = getSpreadsheet().getSheetByName(REQUESTS_SHEET_NAME);
     if (requestSheet) {
-      const patrimonios = finalRoute.map(b => b.patrimonio).join(', ');
+      const patrimonios = route.map(b => b.patrimonio).join(', ');
       const newRow = new Array(requestSheet.getLastColumn()).fill('');
       newRow[COLUMN_INDICES.REQUESTS.TIMESTAMP - 1]    = new Date();
       newRow[COLUMN_INDICES.REQUESTS.PATRIMONIO - 1]   = patrimonios;
@@ -563,7 +542,7 @@ function generateDriverRoute(driverName, location, filters, maxBikes, rangeKm) {
       requestSheet.appendRow(newRow);
     }
 
-    return { success: true, data: finalRoute, message: `Roteiro gerado com ${finalRoute.length} bicicletas.` };
+    return { success: true, data: route, message: `Roteiro gerado com ${route.length} bicicletas.` };
   } catch (e) {
     return { success: false, error: 'Erro ao gerar roteiro: ' + e.message };
   }
@@ -1966,8 +1945,8 @@ function checkAllDivergences() {
 
 function checkDivergences(rowData) {
   const patrimonio  = rowData[COLUMN_INDICES.REPORTS.PATRIMONIO - 1];
-  const status      = (rowData[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim();
-  const observacao  = (rowData[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim();
+  const status      = (rowData[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim().toLowerCase();
+  const observacao  = (rowData[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim().toLowerCase();
   const motorista   = (rowData[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
   const statusSist  = (rowData[COLUMN_INDICES.REPORTS.STATUS_SISTEMA - 1] || '').toString().trim();
   const bateriaRaw  = rowData[COLUMN_INDICES.REPORTS.BATERIA - 1];
@@ -1977,16 +1956,26 @@ function checkDivergences(rowData) {
   const filiais     = ['Filial', 'Serttel Filial SJC', 'Serttel Filial 1'];
   const isFilial    = filiais.some(f => localidade.toLowerCase().includes(f.toLowerCase()));
 
-  if (isFilial && bateria > 70) {
-    const isException = ['manutenção', 'manutencao', 'solicitação', 'solicitacao']
-      .some(t => observacao.toLowerCase().includes(t));
-    if (!isException) addDivergenceNotification(`Bike ${patrimonio}: Bateria alta na Filial (${bateria}%).`, motorista, patrimonio);
+  // REGRA 1: Bike recolhida para Filial com bateria >= 70%
+  // Só dispara se:
+  //   - Status for "Recolhida" (não Vandalizada, não outro)
+  //   - Substatus/observação for "bateria baixa"
+  //   - Bateria estiver >= 70% (contradição — foi dito bateria baixa mas está alta)
+  if (isFilial && status === 'recolhida' && bateria >= 70) {
+    const isBateriaBaixa = observacao.includes('bateria baixa');
+    if (isBateriaBaixa) {
+      addDivergenceNotification(`Bike ${patrimonio}: Registrada como "Bateria Baixa" mas bateria está em ${bateria}%.`, motorista, patrimonio);
+    }
   }
 
-  if (!isFilial && bateria <= 50 && localidade !== '' && !localidade.toLowerCase().includes('fora da estação')) {
-    addDivergenceNotification(`Bike ${patrimonio}: Bateria baixa em ${localidade} (${bateria}%).`, motorista, patrimonio);
+  // REGRA 2: Bike remanejada para Estação com bateria < 50%
+  // Só dispara se status for "Estação" e bateria estiver abaixo de 50%
+  const isEstacao = !isFilial && (status === 'estação' || status === 'estacao');
+  if (isEstacao && bateria < 50 && localidade !== '') {
+    addDivergenceNotification(`Bike ${patrimonio}: Remanejada para estação com bateria baixa (${bateria}%).`, motorista, patrimonio);
   }
 
+  // REGRA 3: Status do sistema incompatível com localização em estação
   const isStation = !isFilial && localidade !== '' && !localidade.toLowerCase().includes('fora da estação');
   if (isStation && statusSist.toLowerCase() !== 'ativo') {
     addDivergenceNotification(`Bike ${patrimonio}: Status ${statusSist} em ${localidade}.`, motorista, patrimonio);
@@ -2785,41 +2774,27 @@ function addToMechanics(bikeNumber) {
 // Chave configurada em Projeto > Propriedades do Script > GOOGLE_MAPS_KEY
 // =================================================================
 function getDirections(fromLat, fromLng, toLat, toLng) {
-  const results = getBatchDirections(fromLat, fromLng, [{ lat: toLat, lng: toLng }]);
-  if (results && results[0]) {
-    return { success: true, ...results[0] };
-  }
-  return { success: false, error: 'Não foi possível obter direções.' };
-}
-
-function getBatchDirections(fromLat, fromLng, destinations) {
   try {
     const key = PropertiesService.getScriptProperties().getProperty('GOOGLE_MAPS_KEY');
-    if (!key) return null;
+    if (!key) return { success: false, error: 'Chave Google Maps não configurada.' };
 
-    // Google Distance Matrix permite até 25 destinos por chamada no plano padrão
-    const destStr = destinations.map(d => `${d.lat},${d.lng}`).join('|');
-    const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${fromLat},${fromLng}&destinations=${destStr}&mode=driving&language=pt-BR&key=${key}`;
+    const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${fromLat},${fromLng}&destinations=${toLat},${toLng}&mode=driving&language=pt-BR&key=${key}`;
     const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
     const data = JSON.parse(response.getContentText());
 
-    if (data.status === 'OK' && data.rows?.[0]?.elements) {
-      return data.rows[0].elements.map(el => {
-        if (el.status === 'OK') {
-          return {
-            distanceM: el.distance.value,
-            durationS: el.duration.value,
-            distanceText: el.distance.text,
-            durationText: el.duration.text
-          };
-        }
-        return null;
-      });
+    if (data.status === 'OK' && data.rows?.[0]?.elements?.[0]?.status === 'OK') {
+      const el = data.rows[0].elements[0];
+      return {
+        success: true,
+        distanceM: el.distance.value,
+        durationS: el.duration.value,
+        distanceText: el.distance.text,
+        durationText: el.duration.text
+      };
     }
-    return null;
+    return { success: false, error: 'Google Maps retornou: ' + data.status };
   } catch (e) {
-    Logger.log('Erro em getBatchDirections: ' + e.message);
-    return null;
+    return { success: false, error: 'Erro ao chamar Google Maps: ' + e.message };
   }
 }
 
