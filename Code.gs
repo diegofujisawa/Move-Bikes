@@ -5,7 +5,6 @@
 //   - SPREADSHEET_ID movido para PropertiesService
 //   - SpreadsheetApp como lazy singleton (sem abertura global)
 //   - Idempotency key para evitar duplicatas por retry
-//   - logReport enxuto: sem checkDivergences/cleanupDuplicates no path crítico
 //   - Lock único removido de handleLogin (deadlock corrigido)
 //   - Cache invalidado após escritas
 //   - Índice pré-computado de bikes (searchBike rápido)
@@ -21,7 +20,7 @@
 // =================================================================
 
 // --- VERSÃO ---
-const BACKEND_VERSION = '84.2-divergence-fix';
+const BACKEND_VERSION = '84.4-remove-divergence';
 
 // --- CONFIGURAÇÃO GLOBAL ---
 // IMPORTANTE: Defina SPREADSHEET_ID via:
@@ -38,78 +37,10 @@ const ALERTS_SHEET_NAME        = 'Alertas';
 const VANDALIZED_SHEET_NAME    = 'Vandalizadas';
 const OCORRENCIA_SHEET_NAME    = 'Ocorrencia';
 const VANDALISMO_SHEET_NAME    = 'Vandalismo';
-const DIVERGENCE_SHEET_NAME    = 'Divergencia';
 const NOTIFICATIONS_SHEET_NAME = 'Notificacoes';
 const DAILY_SUMMARY_SHEET_NAME = 'ResumoDiario';
 const MECHANICS_SHEET_NAME     = 'Mecanica';
 const QUEUE_SHEET_NAME         = 'FilaProcessamento';
-const AUDIT_LOG_SHEET_NAME     = 'LogAuditoria';
-
-// =================================================================
-// --- AUDIT LOG ---
-// Registra toda remoção/modificação de bikes no app ou planilha
-// =================================================================
-function writeAuditLog(action, bikeNumbers, actor, details, origin) {
-  try {
-    const ss = getSpreadsheet();
-    let sheet = ss.getSheetByName(AUDIT_LOG_SHEET_NAME);
-    if (!sheet) {
-      sheet = ss.insertSheet(AUDIT_LOG_SHEET_NAME);
-      sheet.getRange(1, 1, 1, 7).setValues([[
-        'Data/Hora', 'Ação', 'Bikes', 'Responsável', 'Detalhes', 'Origem', 'Status'
-      ]]).setFontWeight('bold').setBackground('#f3f3f3');
-      sheet.setFrozenRows(1);
-      sheet.setColumnWidth(1, 150);
-      sheet.setColumnWidth(3, 200);
-      sheet.setColumnWidth(5, 300);
-    }
-    const bikes = Array.isArray(bikeNumbers) ? bikeNumbers.join(', ') : String(bikeNumbers || '');
-    sheet.appendRow([
-      new Date(),
-      action,
-      bikes,
-      actor || 'Sistema',
-      details || '',
-      origin || 'App',
-      'OK'
-    ]);
-  } catch (e) {
-    console.error('writeAuditLog erro:', e.message);
-  }
-}
-
-function getAuditLog(limit, filterActor, filterAction) {
-  try {
-    const ss = getSpreadsheet();
-    const sheet = ss.getSheetByName(AUDIT_LOG_SHEET_NAME);
-    if (!sheet || sheet.getLastRow() < 2) return { success: true, data: [] };
-
-    const lastRow = sheet.getLastRow();
-    const numRows = Math.min(lastRow - 1, 500);
-    const data = sheet.getRange(lastRow - numRows + 1, 1, numRows, 7).getValues();
-
-    let records = data.map(row => ({
-      timestamp: row[0] instanceof Date ? row[0].toLocaleString('pt-BR', {
-        day:'2-digit', month:'2-digit', year:'numeric',
-        hour:'2-digit', minute:'2-digit', second:'2-digit'
-      }) : String(row[0]),
-      action:  String(row[1] || ''),
-      bikes:   String(row[2] || ''),
-      actor:   String(row[3] || ''),
-      details: String(row[4] || ''),
-      origin:  String(row[5] || ''),
-      status:  String(row[6] || ''),
-    })).reverse(); // mais recentes primeiro
-
-    if (filterActor) records = records.filter(r => r.actor.toLowerCase().includes(filterActor.toLowerCase()));
-    if (filterAction) records = records.filter(r => r.action.toLowerCase().includes(filterAction.toLowerCase()));
-    if (limit) records = records.slice(0, parseInt(limit));
-
-    return { success: true, data: records };
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
-}
 
 // --- STATUS CONSTANTS ---
 const STATUS = {
@@ -142,7 +73,6 @@ const COLUMN_INDICES = {
     STATUS_SISTEMA: 6, BATERIA: 7, TRAVA: 8, LOCALIDADE: 9
   },
   STATE: { MOTORISTA: 1, ROTEIRO: 3, RECOLHIDAS: 4 },
-  DIVERGENCE: { TIMESTAMP: 1, MOTORISTA: 2, PATRIMONIO: 3, MENSAGEM: 4 },
   NOTIFICATIONS: { USUARIO: 1, JSON: 2 },
   DAILY_SUMMARY: {
     DATA: 1, MOTORISTA: 2, PLACA: 3, KM_TOTAL: 4, BATERIA: 5, MANUT_BIKE: 6,
@@ -385,7 +315,6 @@ function doPost(e) {
       case 'saveDailySummary':      response = { ...saveDailySummary(request.summaryData), version: BACKEND_VERSION }; break;
       case 'getAdminAlerts':        response = { ...getAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
       case 'clearAdminAlerts':      response = { ...clearAdminAlerts(request.adminName), version: BACKEND_VERSION }; break;
-      case 'getAuditLog':          response = { ...getAuditLog(request.limit, request.filterActor, request.filterAction), version: BACKEND_VERSION }; break;
       case 'getDirections':        response = { ...getDirections(request.fromLat, request.fromLng, request.toLat, request.toLng), version: BACKEND_VERSION }; break;
       case 'getBikeMovement':      response = { ...getBikeMovement(request.bikeNumber, request.limit), version: BACKEND_VERSION }; break;
       case 'confirmMechanicsReceipt': response = { ...confirmMechanicsReceipt(request.bikeNumber, request.mechanicName), version: BACKEND_VERSION }; break;
@@ -963,7 +892,6 @@ function searchBike(bikeNumber) {
 
 // =================================================================
 // --- LOG REPORT (enxuto — sem tarefas secundárias no path crítico) ---
-// CORREÇÃO: checkDivergences e cleanupRecentDuplicates removidos do
 // path síncrono. Devem ser executados via Trigger periódico (5 min).
 // Cache do índice de bikes invalidado para a bike registrada.
 // =================================================================
@@ -1056,7 +984,6 @@ function logReport(rowData, kmFinal, plate) {
 // =================================================================
 function runPeriodicMaintenance() {
   try { cleanupRecentDuplicates(); } catch (e) { console.error('cleanupDuplicates:', e); }
-  try { checkAllDivergences(); } catch (e) { console.error('checkDivergences:', e); }
 }
 
 // =================================================================
@@ -1478,8 +1405,6 @@ function clearDriverRoute(driverName) {
       }
     }
     if (changed && cancelledBikes.length > 0) {
-      writeAuditLog('Roteiro Cancelado', cancelledBikes, driverName,
-        `${cancelledBikes.length} bike(s) removida(s) do roteiro`, 'App');
     }
     return { success: true, message: changed ? 'Roteiro cancelado.' : 'Nenhuma rota ativa.' };
   } catch (e) {
@@ -1532,11 +1457,7 @@ function finalizeRouteBike(request) {
     routeBikes = routeBikes.filter(b => String(b).trim() !== String(bikeNumber).trim());
     if (finalStatus === 'Recolhida') {
       if (!collectedBikes.map(String).includes(String(bikeNumber))) collectedBikes.push(bikeNumber);
-      writeAuditLog('Retirada do Roteiro → Posse', [bikeNumber], driverName,
-        `Bike recolhida pelo motorista`, 'App');
     } else {
-      writeAuditLog('Retirada do Roteiro', [bikeNumber], driverName,
-        `Status: ${finalStatus}${finalObservation ? ' | Obs: ' + finalObservation : ''}`, 'App');
     }
 
     const statusLower = finalStatus.toLowerCase();
@@ -1573,8 +1494,6 @@ function finalizeCollectedBike(request) {
 
     collectedBikes = collectedBikes.filter(b => String(b).trim() !== String(bikeNumber).trim());
     const reportStatus = finalStatus === 'Filial' ? 'Recolhida' : finalStatus;
-    writeAuditLog('Retirada da Posse', [bikeNumber], driverName,
-      `Destino: ${finalStatus}${finalObservation ? ' | Obs: ' + finalObservation : ''}`, 'App');
     const rowData = [new Date(), bikeNumber, reportStatus, finalObservation, driverName,
       bikeDetails['Status'], bikeDetails['Bateria'], bikeDetails['Trava'], bikeDetails['Localidade']];
     logReport(rowData);
@@ -1919,82 +1838,9 @@ function syncWithRequests(patrimonio, status, observacao, motorista) {
 
 // =================================================================
 // --- NOTIFICAÇÕES E DIVERGÊNCIAS ---
-// (checkDivergences movido para Trigger periódico via runPeriodicMaintenance)
 // =================================================================
-function checkAllDivergences() {
-  const reportSheet = getSpreadsheet().getSheetByName(REPORT_SHEET_NAME);
-  if (!reportSheet) return;
-  const lastRow = reportSheet.getLastRow();
-  if (lastRow < 2) return;
 
-  // Processa apenas os últimos registros — evita reprocessar histórico inteiro
-  const numRows = Math.min(lastRow - 1, 50);
-  const data = reportSheet.getRange(lastRow - numRows + 1, 1, numRows, reportSheet.getLastColumn()).getValues();
-  const now = new Date();
-  const TWO_HOURS = 2 * 60 * 60 * 1000;
 
-  data.forEach(row => {
-    try {
-      // Só processa registros das últimas 2 horas
-      const ts = new Date(row[COLUMN_INDICES.REPORTS.TIMESTAMP - 1]);
-      if (isNaN(ts.getTime()) || (now - ts) > TWO_HOURS) return;
-      checkDivergences(row);
-    } catch (e) {}
-  });
-}
-
-function checkDivergences(rowData) {
-  const patrimonio  = rowData[COLUMN_INDICES.REPORTS.PATRIMONIO - 1];
-  const status      = (rowData[COLUMN_INDICES.REPORTS.STATUS - 1] || '').toString().trim().toLowerCase();
-  const observacao  = (rowData[COLUMN_INDICES.REPORTS.OBSERVACAO - 1] || '').toString().trim().toLowerCase();
-  const motorista   = (rowData[COLUMN_INDICES.REPORTS.MOTORISTA - 1] || '').toString().trim();
-  const statusSist  = (rowData[COLUMN_INDICES.REPORTS.STATUS_SISTEMA - 1] || '').toString().trim();
-  const bateriaRaw  = rowData[COLUMN_INDICES.REPORTS.BATERIA - 1];
-  const bVal = parseFloat(String(bateriaRaw).replace('%', '').replace(',', '.')) || 0;
-  const bateria = bVal <= 1 ? Math.round(bVal * 100) : Math.round(bVal);
-  const localidade  = (rowData[COLUMN_INDICES.REPORTS.LOCALIDADE - 1] || '').toString().trim();
-  const filiais     = ['Filial', 'Serttel Filial SJC', 'Serttel Filial 1'];
-  const isFilial    = filiais.some(f => localidade.toLowerCase().includes(f.toLowerCase()));
-
-  // REGRA 1: Bike recolhida para Filial com bateria >= 70%
-  // Só dispara se:
-  //   - Status for "Recolhida" (não Vandalizada, não outro)
-  //   - Substatus/observação for "bateria baixa"
-  //   - Bateria estiver >= 70% (contradição — foi dito bateria baixa mas está alta)
-  if (isFilial && status === 'recolhida' && bateria >= 70) {
-    const isBateriaBaixa = observacao.includes('bateria baixa');
-    if (isBateriaBaixa) {
-      addDivergenceNotification(`Bike ${patrimonio}: Registrada como "Bateria Baixa" mas bateria está em ${bateria}%.`, motorista, patrimonio);
-    }
-  }
-
-  // REGRA 2: Bike remanejada para Estação com bateria < 50%
-  // Só dispara se status for "Estação" e bateria estiver abaixo de 50%
-  const isEstacao = !isFilial && (status === 'estação' || status === 'estacao');
-  if (isEstacao && bateria < 50 && localidade !== '') {
-    addDivergenceNotification(`Bike ${patrimonio}: Remanejada para estação com bateria baixa (${bateria}%).`, motorista, patrimonio);
-  }
-
-  // REGRA 3: Status do sistema incompatível com localização em estação
-  const isStation = !isFilial && localidade !== '' && !localidade.toLowerCase().includes('fora da estação');
-  if (isStation && statusSist.toLowerCase() !== 'ativo') {
-    addDivergenceNotification(`Bike ${patrimonio}: Status ${statusSist} em ${localidade}.`, motorista, patrimonio);
-  }
-}
-
-function addDivergenceNotification(messageBase, driverName, patrimonio) {
-  logDivergence(driverName, patrimonio, messageBase);
-  const accessSheet = getSpreadsheet().getSheetByName(ACCESS_SHEET_NAME);
-  if (!accessSheet) return;
-  const accessData = accessSheet.getDataRange().getValues();
-  const adms = accessData
-    .filter(row => normalizeCategory(row[COLUMN_INDICES.ACCESS.CATEGORIA - 1]).includes('ADM'))
-    .map(row => row[0]);
-  const notificationsMap = {};
-  adms.forEach(adm => { notificationsMap[adm] = `⚠️ DIVERGÊNCIA (${driverName}): ${messageBase}`; });
-  if (driverName) notificationsMap[driverName] = `⚠️ ATENÇÃO: Inconsistência na bike ${patrimonio}: ${messageBase}`;
-  batchAddNotifications(notificationsMap);
-}
 
 function batchAddNotifications(notificationsMap) {
   let sheet = getSpreadsheet().getSheetByName(NOTIFICATIONS_SHEET_NAME);
@@ -2027,67 +1873,6 @@ function batchAddNotifications(notificationsMap) {
   });
 }
 
-function logDivergence(driverName, patrimonio, message) {
-  let sheet = getSpreadsheet().getSheetByName(DIVERGENCE_SHEET_NAME);
-  if (!sheet) {
-    sheet = getSpreadsheet().insertSheet(DIVERGENCE_SHEET_NAME);
-    sheet.appendRow(['Data/Hora', 'Motorista', 'Patrimônio', 'Mensagem']);
-    sheet.getRange(1, 1, 1, 4).setFontWeight('bold').setBackground('#f3f3f3');
-    sheet.setFrozenRows(1);
-  }
-
-  const now = new Date();
-  const SIX_HOURS = 6 * 60 * 60 * 1000;
-
-  // Verifica se algum ADM confirmou leitura após a última ocorrência desta divergência
-  // Se sim, não recria — a divergência foi lida e confirmada
-  const props = PropertiesService.getScriptProperties().getProperties();
-  for (const key of Object.keys(props)) {
-    if (key.startsWith('lastClearAlert_')) {
-      const clearTime = new Date(props[key]);
-      if (!isNaN(clearTime.getTime()) && (now - clearTime) < SIX_HOURS) {
-        // Um ADM limpou os alertas nas últimas 6h
-        // Só recria se a divergência for mais recente que a limpeza
-        // Verifica se já existe esta divergência após a limpeza
-        const lastRow = sheet.getLastRow();
-        if (lastRow > 1) {
-          const numCheck = Math.min(lastRow - 1, 50);
-          const data = sheet.getRange(lastRow - numCheck + 1, 1, numCheck, 4).getValues();
-          for (let i = data.length - 1; i >= 0; i--) {
-            const rowDate = new Date(data[i][0]);
-            if (isNaN(rowDate.getTime())) continue;
-            if (rowDate < clearTime) break; // anterior à limpeza — para
-            if ((data[i][1] || '').toString() === driverName &&
-                (data[i][2] || '').toString() === patrimonio.toString() &&
-                (data[i][3] || '').toString() === message) {
-              return; // já existe após a limpeza — não duplica
-            }
-          }
-        }
-        break;
-      }
-    }
-  }
-
-  // Previne duplicatas nas últimas 6 horas
-  const lastRow = sheet.getLastRow();
-  if (lastRow > 1) {
-    const numCheck = Math.min(lastRow - 1, 200);
-    const data = sheet.getRange(lastRow - numCheck + 1, 1, numCheck, 4).getValues();
-    for (let i = data.length - 1; i >= 0; i--) {
-      const rowDate = new Date(data[i][0]);
-      if (isNaN(rowDate.getTime())) continue;
-      if (now - rowDate > SIX_HOURS) break;
-      if ((data[i][1] || '').toString() === driverName &&
-          (data[i][2] || '').toString() === patrimonio.toString() &&
-          (data[i][3] || '').toString() === message) {
-        return; // já existe nas últimas 6h — não duplica
-      }
-    }
-  }
-
-  sheet.appendRow([now, driverName, patrimonio, message]);
-}
 
 function getAdminAlerts(adminName) {
   try {
@@ -2109,36 +1894,17 @@ function getAdminAlerts(adminName) {
 
 function clearAdminAlerts(adminName) {
   try {
-    // 1. Limpa as notificações do usuário na aba Notificacoes
     const sheet = getSpreadsheet().getSheetByName(NOTIFICATIONS_SHEET_NAME);
-    if (sheet) {
-      const data = sheet.getDataRange().getValues();
-      const adminLower = (adminName || '').toString().trim().toLowerCase();
-      for (let i = 1; i < data.length; i++) {
-        if ((data[i][0] || '').toString().trim().toLowerCase() === adminLower) {
-          sheet.getRange(i + 1, COLUMN_INDICES.NOTIFICATIONS.JSON).setValue('[]');
-          SpreadsheetApp.flush();
-          break;
-        }
+    if (!sheet) return { success: true };
+    const data = sheet.getDataRange().getValues();
+    const adminLower = (adminName || '').toString().trim().toLowerCase();
+    for (let i = 1; i < data.length; i++) {
+      if ((data[i][0] || '').toString().trim().toLowerCase() === adminLower) {
+        sheet.getRange(i + 1, COLUMN_INDICES.NOTIFICATIONS.JSON).setValue('[]');
+        SpreadsheetApp.flush();
+        break;
       }
     }
-
-    // 2. Marca as divergências existentes como lidas
-    // Adiciona uma linha marcadora na aba Divergencia com timestamp de leitura
-    // O checkDivergences vai checar se há uma leitura mais recente que a divergência
-    let divSheet = getSpreadsheet().getSheetByName(DIVERGENCE_SHEET_NAME);
-    if (!divSheet) {
-      divSheet = getSpreadsheet().insertSheet(DIVERGENCE_SHEET_NAME);
-      divSheet.appendRow(['Data/Hora', 'Motorista', 'Patrimônio', 'Mensagem']);
-      divSheet.getRange(1, 1, 1, 4).setFontWeight('bold').setBackground('#f3f3f3');
-      divSheet.setFrozenRows(1);
-    }
-
-    // Registra timestamp de leitura — o logDivergence vai verificar isso
-    // antes de recriar divergências antigas
-    const propKey = 'lastClearAlert_' + (adminName || '').toString().trim();
-    PropertiesService.getScriptProperties().setProperty(propKey, new Date().toISOString());
-
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
@@ -3190,8 +2956,6 @@ function finalizeTrailer(trailerName) {
     }
   }
   if (count > 0) {
-    writeAuditLog('Carretinha Finalizada', remanejadas, 'Mecânica',
-      `Carretinha: ${trailerName} | ${count} bike(s) remanejada(s)`, 'App');
   }
   return { success: true, message: `${count} bikes finalizadas da carretinha ${trailerName}.` };
 }
@@ -3274,8 +3038,6 @@ function cleanupRecentDuplicates() {
     if (unique.length > 0) {
       SpreadsheetApp.flush();
       if (deletedBikes.length > 0) {
-        writeAuditLog('Duplicata Removida do Relatório', deletedBikes, 'Sistema',
-          `${unique.length} linha(s) duplicada(s) removida(s) automaticamente`, 'Planilha');
       }
     }
     return unique.length;
